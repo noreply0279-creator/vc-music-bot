@@ -10,7 +10,6 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pytgcalls import PyTgCalls
 from pytgcalls.types.input_stream import InputStream, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
-from pytgcalls.types.input_stream import AudioParameters
 from Crypto.Cipher import DES
 
 FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
@@ -68,11 +67,11 @@ def download_and_convert(query):
     with open(mp3_file, "wb") as f:
         f.write(audio_req.content)
         
-    # High-fidelity 48kHz Stereo 16-bit PCM conversion with volume boost
+    # PyTgCalls 0.9.x exact native specification: 48000Hz Mono S16LE PCM
     cmd = [
         FFMPEG_BIN, "-y", "-i", mp3_file,
         "-f", "s16le",
-        "-ac", "2",
+        "-ac", "1",
         "-ar", "48000",
         "-acodec", "pcm_s16le",
         raw_file
@@ -110,7 +109,7 @@ async def main():
             await message.reply_text("❌ **Please provide a song title!**\nExample: `/play Kesariya`")
             return
         query = message.text.split(None, 1)[1]
-        m = await message.reply_text(f"🔎 **Searching & Processing Audio:** `{query}`...")
+        m = await message.reply_text(f"🔎 **Searching & Preparing:** `{query}`...")
         try:
             loop = asyncio.get_running_loop()
             raw_path, title, singers, duration = await loop.run_in_executor(None, download_and_convert, query)
@@ -118,10 +117,7 @@ async def main():
             stream = InputStream(
                 InputAudioStream(
                     raw_path,
-                    AudioParameters(
-                        bitrate=48000,
-                        channels=2,
-                    ),
+                    HighQualityAudio(),
                 )
             )
             
@@ -142,7 +138,7 @@ async def main():
                 f"📌 **Title:** `{title}`\n"
                 f"🎤 **Artist:** `{singers}`\n"
                 f"⏱ **Duration:** `{duration}`\n"
-                f"🎧 **Audio Quality:** `HD Audio (320kbps Lossless)`"
+                f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
             )
             await m.edit(caption, reply_markup=buttons)
             
