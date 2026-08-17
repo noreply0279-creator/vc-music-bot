@@ -32,19 +32,19 @@ def download_audio(query):
 
 @app.on_message(filters.command(["start", "ping"]))
 async def start_cmd(client, message):
-    await message.reply_text("✅ Bot bilkul active aur live hai! VC me gaana chalane ke liye `/play [gaane ka naam]` bhejein.")
+    await message.reply_text("✅ Bot bilkul active chhe! Gaano vagadva mate `/play [song name]` lakho.")
 
 @app.on_message(filters.command("play"))
 async def play_music(client, message):
     if len(message.command) < 2:
-        await message.reply_text("❌ Kripya gaane ka naam likhein! Example: `/play Kesariya`")
+        await message.reply_text("❌ Kripya gaana nu naam lakho! Example: `/play Kesariya`")
         return
     query = message.text.split(None, 1)[1]
-    m = await message.reply_text(f"🔎 `{query}` search ho raha hai...")
+    m = await message.reply_text(f"🔎 `{query}` search thai rahyu chhe...")
     try:
         loop = asyncio.get_running_loop()
         file_path, title = await loop.run_in_executor(None, download_audio, query)
-        await m.edit(f"▶️ **Voice Chat me baj raha hai:** `{title}`")
+        await m.edit(f"▶️ **Voice Chat ma vaagi rahyu chhe:** `{title}`")
         await call.join_group_call(
             message.chat.id,
             InputStream(
@@ -64,7 +64,7 @@ async def start_services():
     await app.start()
     await user.start()
     await call.start()
-    print("\nBot aur Assistant dono successfully ready hain!")
+    print("\nBot aur Assistant ready!")
     
     server = web.Application()
     server.router.add_get("/", handle_ping)
