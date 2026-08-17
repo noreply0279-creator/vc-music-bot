@@ -30,8 +30,17 @@ async def handle_ping(request):
     return web.Response(text="Bot is running 24/7!")
 
 async def main():
-    loop = asyncio.get_event_loop()
-    
+    # 1. Sabthi pehla Render no Web Port chalu karvanno (Tena thi Live status malse)
+    server = web.Application()
+    server.router.add_get("/", handle_ping)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
+    # 2. Pachi Bot ane Assistant start karvana
     app = Client("music_bot_v2", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
     user = Client("assistant_account", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
     call = PyTgCalls(user)
@@ -48,6 +57,7 @@ async def main():
         query = message.text.split(None, 1)[1]
         m = await message.reply_text(f"🔎 `{query}` search thai rahyu chhe...")
         try:
+            loop = asyncio.get_running_loop()
             file_path, title = await loop.run_in_executor(None, download_audio, query)
             await m.edit(f"▶️ **Voice Chat ma vaagi rahyu chhe:** `{title}`")
             await call.join_group_call(
@@ -67,17 +77,7 @@ async def main():
     await call.start()
     print("\nBot aur Assistant ready!")
 
-    server = web.Application()
-    server.router.add_get("/", handle_ping)
-    runner = web.AppRunner(server)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(main())
+    asyncio.run(main())
