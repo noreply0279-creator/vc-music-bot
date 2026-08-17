@@ -13,21 +13,30 @@ BOT_TOKEN = "8663631826:AAGHpKJH9vKkaFast9VpKjUFJ6PWNpFLvKs"
 STRING_SESSION = "BQF8n_YAHma28wBi1V61Ox_f22FGlFmHR5H065LbA-fGnABXwEzB2I6Ci3Ldhx8NDy9oZ5u6csQjwJ5JGNjv2m-ksVf5zBai4YN8Fa6UEWY83UE3yMbvZgsjtn6Xf89RNIsu2x7TeAEXBaKiF7du1l2nk0N8cm2jLP7bALQ0eVAdJ00GXnqIlGAhioBVcCwfZiXg5snIflglNa8ObUJJJhEubN-dDxfnMYOe8wQmngIMERiqOPS0ZKWamMkwLXWb7ljiY9-KTFN6R1az2ok6Vt0Fb9v_mMge4o0YWejF4D8En9TahcCJt_xt2rzNaF8xARSifoNY4cScOBt5bkyCArweSe_1FAAAAAHyu8ZdAA"
 
 def get_jiosaavn_song(query):
-    url = f"https://jiosaavn-api-unofficial.vercel.app/api/search/songs?query={query}"
-    r = requests.get(url, timeout=10)
-    if r.status_code == 200:
-        data = r.json()
+    search_url = f"https://saavn.me/search/songs?query={query}&page=1&limit=1"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(search_url, headers=headers, timeout=10)
+    data = r.json()
+    
+    if data.get("status") == "SUCCESS" or "data" in data:
         results = data.get("data", {}).get("results", [])
         if results:
             song = results[0]
             title = song.get("name", "Song")
             download_urls = song.get("downloadUrl", [])
             if download_urls:
-                return download_urls[-1].get("url"), title
-    raise Exception("Gaano na malyo! Bijoo gaano try karo.")
+                return download_urls[-1].get("link") or download_urls[-1].get("url"), title
+                
+    fallback_url = f"https://jiosaavn-api-privatecvc2.vercel.app/search?query={query}"
+    r2 = requests.get(fallback_url, headers=headers, timeout=10)
+    data2 = r2.json()
+    if data2 and len(data2) > 0:
+        return data2[0].get("media_url"), data2[0].get("song")
+
+    raise Exception("Song not found! Please try another track.")
 
 async def handle_ping(request):
-    return web.Response(text="Bot is live 24/7!")
+    return web.Response(text="Bot is running 24/7!")
 
 async def main():
     server = web.Application()
@@ -44,19 +53,19 @@ async def main():
 
     @app.on_message(filters.command(["start", "ping"]))
     async def start_cmd(client, message):
-        await message.reply_text("✅ Bot active chhe! VC ma gaano vagadva `/play [gaana nu naam]` lakho.")
+        await message.reply_text("✅ **Bot is active and running!**\nUse `/play [song name]` to play music in the Voice Chat.")
 
     @app.on_message(filters.command("play"))
     async def play_music(client, message):
         if len(message.command) < 2:
-            await message.reply_text("❌ Gaana nu naam lakho! Example: `/play Kesariya`")
+            await message.reply_text("❌ **Please provide a song title!**\nExample: `/play Kesariya`")
             return
         query = message.text.split(None, 1)[1]
-        m = await message.reply_text(f"🔎 `{query}` search thai rahyu chhe...")
+        m = await message.reply_text(f"🔎 **Searching for:** `{query}`...")
         try:
             loop = asyncio.get_running_loop()
             stream_url, title = await loop.run_in_executor(None, get_jiosaavn_song, query)
-            await m.edit(f"▶️ **Voice Chat ma vaage chhe:** `{title}`")
+            await m.edit(f"▶️ **Now Playing in Voice Chat:** `{title}`")
             await call.join_group_call(
                 message.chat.id,
                 InputStream(
@@ -67,7 +76,7 @@ async def main():
                 )
             )
         except Exception as e:
-            await m.edit(f"❌ Error: {str(e)}")
+            await m.edit(f"❌ **Error:** `{str(e)}`")
 
     await app.start()
     await user.start()
