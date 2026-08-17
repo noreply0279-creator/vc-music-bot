@@ -1,39 +1,54 @@
 import os
 import asyncio
+import json
+import base64
 import requests
 from aiohttp import web
 from pyrogram import Client, filters
 from pytgcalls import PyTgCalls
 from pytgcalls.types.input_stream import InputStream, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
+from Crypto.Cipher import DES
 
 API_ID = 24944630
 API_HASH = "49d2337722244115abf15a4bc9d86eb3"
 BOT_TOKEN = "8663631826:AAGHpKJH9vKkaFast9VpKjUFJ6PWNpFLvKs"
 STRING_SESSION = "BQF8n_YAHma28wBi1V61Ox_f22FGlFmHR5H065LbA-fGnABXwEzB2I6Ci3Ldhx8NDy9oZ5u6csQjwJ5JGNjv2m-ksVf5zBai4YN8Fa6UEWY83UE3yMbvZgsjtn6Xf89RNIsu2x7TeAEXBaKiF7du1l2nk0N8cm2jLP7bALQ0eVAdJ00GXnqIlGAhioBVcCwfZiXg5snIflglNa8ObUJJJhEubN-dDxfnMYOe8wQmngIMERiqOPS0ZKWamMkwLXWb7ljiY9-KTFN6R1az2ok6Vt0Fb9v_mMge4o0YWejF4D8En9TahcCJt_xt2rzNaF8xARSifoNY4cScOBt5bkyCArweSe_1FAAAAAHyu8ZdAA"
 
-def get_jiosaavn_song(query):
-    search_url = f"https://saavn.me/search/songs?query={query}&page=1&limit=1"
+DES_KEY = b"38346591"
+
+def decrypt_url(enc_url):
+    cipher = DES.new(DES_KEY, DES.MODE_ECB)
+    dec = cipher.decrypt(base64.b64decode(enc_url))
+    url = dec.decode('utf-8', errors='ignore')
+    pad = ord(url[-1])
+    if 0 < pad <= 8:
+        url = url[:-pad]
+    return url.replace("_96.mp4", "_320.mp4")
+
+def fetch_saavn_direct(query):
+    search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query={query}"
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(search_url, headers=headers, timeout=10)
     data = r.json()
+    songs = data.get("songs", {}).get("data", [])
+    if not songs:
+        raise Exception("Song not found! Please check spelling.")
     
-    if data.get("status") == "SUCCESS" or "data" in data:
-        results = data.get("data", {}).get("results", [])
-        if results:
-            song = results[0]
-            title = song.get("name", "Song")
-            download_urls = song.get("downloadUrl", [])
-            if download_urls:
-                return download_urls[-1].get("link") or download_urls[-1].get("url"), title
-                
-    fallback_url = f"https://jiosaavn-api-privatecvc2.vercel.app/search?query={query}"
-    r2 = requests.get(fallback_url, headers=headers, timeout=10)
-    data2 = r2.json()
-    if data2 and len(data2) > 0:
-        return data2[0].get("media_url"), data2[0].get("song")
+    song_id = songs[0].get("id")
+    title = songs[0].get("title", "Song").replace("&quot;", '"').replace("&amp;", "&")
 
-    raise Exception("Song not found! Please try another track.")
+    detail_url = f"https://www.jiosaavn.com/api.php?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0&_format=json&pids={song_id}"
+    r_detail = requests.get(detail_url, headers=headers, timeout=10)
+    detail_data = r_detail.json()
+    
+    song_data = detail_data.get(song_id)
+    if not song_data:
+        raise Exception("Unable to retrieve audio stream.")
+
+    encrypted_media_url = song_data.get("encrypted_media_url")
+    stream_url = decrypt_url(encrypted_media_url)
+    return stream_url, title
 
 async def handle_ping(request):
     return web.Response(text="Bot is running 24/7!")
@@ -64,7 +79,7 @@ async def main():
         m = await message.reply_text(f"🔎 **Searching for:** `{query}`...")
         try:
             loop = asyncio.get_running_loop()
-            stream_url, title = await loop.run_in_executor(None, get_jiosaavn_song, query)
+            stream_url, title = await loop.run_in_executor(None, fetch_saavn_direct, query)
             await m.edit(f"▶️ **Now Playing in Voice Chat:** `{title}`")
             await call.join_group_call(
                 message.chat.id,
