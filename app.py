@@ -1,14 +1,17 @@
 import os
 import asyncio
-import json
 import base64
 import requests
+import imageio_ffmpeg
 from aiohttp import web
 from pyrogram import Client, filters
 from pytgcalls import PyTgCalls
 from pytgcalls.types.input_stream import InputStream, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
 from Crypto.Cipher import DES
+
+# Set FFmpeg binary environment variable
+os.environ["PATH"] += os.pathsep + os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 
 API_ID = 24944630
 API_HASH = "49d2337722244115abf15a4bc9d86eb3"
@@ -81,15 +84,27 @@ async def main():
             loop = asyncio.get_running_loop()
             stream_url, title = await loop.run_in_executor(None, fetch_saavn_direct, query)
             await m.edit(f"▶️ **Now Playing in Voice Chat:** `{title}`")
-            await call.join_group_call(
-                message.chat.id,
-                InputStream(
-                    InputAudioStream(
-                        stream_url,
-                        HighQualityAudio(),
+            
+            try:
+                await call.join_group_call(
+                    message.chat.id,
+                    InputStream(
+                        InputAudioStream(
+                            stream_url,
+                            HighQualityAudio(),
+                        )
                     )
                 )
-            )
+            except Exception:
+                await call.change_stream(
+                    message.chat.id,
+                    InputStream(
+                        InputAudioStream(
+                            stream_url,
+                            HighQualityAudio(),
+                        )
+                    )
+                )
         except Exception as e:
             await m.edit(f"❌ **Error:** `{str(e)}`")
 
