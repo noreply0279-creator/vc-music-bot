@@ -1,35 +1,32 @@
 import os
 import asyncio
+import aiohttp
 from aiohttp import web
 from pyrogram import Client, filters
 from pytgcalls import PyTgCalls
 from pytgcalls.types.input_stream import InputStream, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
-import yt_dlp
 
 API_ID = 24944630
 API_HASH = "49d2337722244115abf15a4bc9d86eb3"
 BOT_TOKEN = "8663631826:AAGHpKJH9vKkaFast9VpKjUFJ6PWNpFLvKs"
 STRING_SESSION = "BQF8n_YAHma28wBi1V61Ox_f22FGlFmHR5H065LbA-fGnABXwEzB2I6Ci3Ldhx8NDy9oZ5u6csQjwJ5JGNjv2m-ksVf5zBai4YN8Fa6UEWY83UE3yMbvZgsjtn6Xf89RNIsu2x7TeAEXBaKiF7du1l2nk0N8cm2jLP7bALQ0eVAdJ00GXnqIlGAhioBVcCwfZiXg5snIflglNa8ObUJJJhEubN-dDxfnMYOe8wQmngIMERiqOPS0ZKWamMkwLXWb7ljiY9-KTFN6R1az2ok6Vt0Fb9v_mMge4o0YWejF4D8En9TahcCJt_xt2rzNaF8xARSifoNY4cScOBt5bkyCArweSe_1FAAAAAHyu8ZdAA"
 
-ydl_ops = {
-    'format': 'bestaudio/best',
-    'default_search': 'ytsearch1',
-    'outtmpl': '%(id)s.%(ext)s',
-    'quiet': True,
-    'nocheckcertificate': True,
-    'extractor_args': {
-        'youtube': {
-            'player_client': ['android', 'web_creator']
-        }
-    }
-}
-
-def download_audio(query):
-    with yt_dlp.YoutubeDL(ydl_ops) as ydl:
-        info = ydl.extract_info(query, download=True)
-        data = info['entries'][0] if 'entries' in info else info
-        return ydl.prepare_filename(data), data.get('title', 'Music')
+async def fetch_song_stream(query):
+    api_url = f"https://saavn.dev/api/search/songs?query={query}&page=1&limit=1"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(api_url) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                results = data.get("data", {}).get("results", [])
+                if results:
+                    song = results[0]
+                    title = song.get("name", "Music")
+                    download_urls = song.get("downloadUrl", [])
+                    if download_urls:
+                        stream_url = download_urls[-1].get("url")
+                        return stream_url, title
+    raise Exception("Gaana nahi mila!")
 
 async def handle_ping(request):
     return web.Response(text="Bot is running 24/7!")
@@ -60,14 +57,13 @@ async def main():
         query = message.text.split(None, 1)[1]
         m = await message.reply_text(f"🔎 `{query}` search thai rahyu chhe...")
         try:
-            loop = asyncio.get_running_loop()
-            file_path, title = await loop.run_in_executor(None, download_audio, query)
+            stream_url, title = await fetch_song_stream(query)
             await m.edit(f"▶️ **Voice Chat ma vaagi rahyu chhe:** `{title}`")
             await call.join_group_call(
                 message.chat.id,
                 InputStream(
                     InputAudioStream(
-                        file_path,
+                        stream_url,
                         HighQualityAudio(),
                     )
                 )
