@@ -1,5 +1,5 @@
 import asyncio
-from pyrogram import Client, filters
+from hydrogram import Client, filters
 from pytgcalls import PyTgCalls
 from pytgcalls.types import MediaStream
 import yt_dlp
