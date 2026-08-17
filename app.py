@@ -1,4 +1,3 @@
-import os
 import asyncio
 from pyrogram import Client, filters
 from pytgcalls import PyTgCalls
@@ -22,26 +21,24 @@ ydl_ops = {
     'nocheckcertificate': True
 }
 
+def download_audio(query):
+    with yt_dlp.YoutubeDL(ydl_ops) as ydl:
+        info = ydl.extract_info(query, download=True)
+        data = info['entries'][0] if 'entries' in info else info
+        return ydl.prepare_filename(data), data.get('title', 'Music')
+
 @app.on_message(filters.command("play") & filters.group)
 async def play_music(client, message):
     if len(message.command) < 2:
-        await message.reply_text("❌ Kripya gane ka naam likhein! Example: `/play Kesariya`")
+        await message.reply_text("❌ Gaane ka naam likhein! Example: `/play Kesariya`")
         return
-
-    chat_id = message.chat.id
     query = message.text.split(None, 1)[1]
-    m = await message.reply_text("🔎 Gana dhund raha hoon...")
-
+    m = await message.reply_text("🔎 Gaana search ho raha hai...")
     try:
-        with yt_dlp.YoutubeDL(ydl_ops) as ydl:
-            info_dict = ydl.extract_info(query, download=True)
-            video_data = info_dict['entries'][0] if 'entries' in info_dict else info_dict
-            file_path = ydl.prepare_filename(video_data)
-            title = video_data.get('title', 'Music')
-
+        loop = asyncio.get_running_loop()
+        file_path, title = await loop.run_in_executor(None, download_audio, query)
         await m.edit(f"▶️ **Voice Chat me baj raha hai:** `{title}`")
-        await call.play(chat_id, MediaStream(file_path))
-
+        await call.play(message.chat.id, MediaStream(file_path))
     except Exception as e:
         await m.edit(f"❌ Error: {str(e)}")
 
@@ -50,46 +47,6 @@ async def start_services():
     await user.start()
     await call.start()
     print("\nBot aur Assistant VC ke liye ready hain!")
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(start_services())
-            info_dict = ydl.extract_info(query, download=True)
-            video_data = info_dict['entries'][0] if 'entries' in info_dict else info_dict
-            file_path = ydl.prepare_filename(video_data)
-            title = video_data.get('title', 'Music')
-
-        await m.edit(f"▶️ **Voice Chat me baj raha hai:** `{title}`")
-        await call.play(chat_id, MediaStream(file_path))
-
-    except Exception as e:
-        await m.edit(f"❌ Error: {str(e)}")
-
-async def start_services():
-    await app.start()
-    await user.start()
-    await call.start()
-    print("\nBot aur Assistant VC ke liye ready hain!")
-    await asyncio.Event().wait()
-
-if __name__ == "__main__":
-    asyncio.run(start_services())
-            info_dict = ydl.extract_info(query, download=True)
-            video_data = info_dict['entries'][0] if 'entries' in info_dict else info_dict
-            file_path = ydl.prepare_filename(video_data)
-            title = video_data.get('title', 'Music')
-
-        await m.edit(f"▶️ **Voice Chat me baj raha hai:** `{title}`")
-        await call.play(chat_id, AudioPiped(file_path))
-
-    except Exception as e:
-        await m.edit(f"❌ Error: {str(e)}")
-
-async def start_services():
-    await app.start()
-    await user.start()
-    await call.start()
-    print("Bot aur Assistant VC ke liye ready hain!")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
