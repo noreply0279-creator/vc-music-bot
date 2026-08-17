@@ -110,12 +110,20 @@ def get_controls():
             InlineKeyboardButton("🔀 Shuffle", callback_data="shuffle_music"),
             InlineKeyboardButton("⏭ Skip", callback_data="skip_music"),
             InlineKeyboardButton("⏹ Stop", callback_data="stop_music")
+        ],
+        [
+            InlineKeyboardButton("🗑 Delete This", callback_data="delete_msg")
         ]
     ])
 
+def get_queue_markup():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🗑 Delete This", callback_data="delete_msg")]
+    ])
+
 async def is_admin(client, chat_id, user_id):
-    if user_id in [63631826]:
-        return True
+    if not user_id:
+        return False
     try:
         member = await client.get_chat_member(chat_id, user_id)
         if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
@@ -125,7 +133,7 @@ async def is_admin(client, chat_id, user_id):
     return False
 
 async def handle_ping(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="Music Bot is running 24/7!")
 
 async def main():
     server = web.Application()
@@ -149,11 +157,10 @@ async def main():
                 invite_link = await app.export_chat_invite_link(chat_id)
                 await user.join_chat(invite_link)
         except Exception as e:
-            print(f"Auto-join error: {e}")
+            print(f"Auto-join assistant error: {e}")
 
     async def delayed_assistant_leave(chat_id, delay=180):
         try:
-            # Wait for 3 minutes (180s) before leaving
             await asyncio.sleep(delay)
             if chat_id not in ACTIVE_TRACK:
                 try:
@@ -167,6 +174,29 @@ async def main():
                 await app.send_message(chat_id, "👋 **Assistant left due to 3 minutes of inactivity.**")
         except asyncio.CancelledError:
             pass
+
+    async def update_timeline(chat_id, message_id, song_info):
+        total_sec = song_info["duration_sec"]
+        current_sec = 0
+        while current_sec < total_sec:
+            await asyncio.sleep(10)
+            current_sec += 10
+            if chat_id not in ACTIVE_TRACK or ACTIVE_TRACK[chat_id] != song_info:
+                return
+            bar = get_progress_bar(current_sec, total_sec)
+            played_str = format_sec(min(current_sec, total_sec))
+            caption = (
+                f"🎵 **Now Playing in Voice Chat**\n\n"
+                f"📌 **Title:** `{song_info['title']}`\n"
+                f"🎤 **Artist:** `{song_info['artist']}`\n"
+                f"👤 **Requested By:** {song_info['requester']}\n"
+                f"⏱ **Time:** `{played_str} {bar} {song_info['duration_str']}`\n"
+                f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
+            )
+            try:
+                await app.edit_message_caption(chat_id, message_id, caption=caption, reply_markup=get_controls())
+            except Exception:
+                pass
 
     async def play_next(chat_id):
         if chat_id in TIMERS:
@@ -183,7 +213,6 @@ async def main():
                 await call.leave_group_call(chat_id)
             except Exception:
                 pass
-            # Start 3-minute countdown before leaving group
             if chat_id in LEAVE_TIMERS:
                 LEAVE_TIMERS[chat_id].cancel()
             LEAVE_TIMERS[chat_id] = asyncio.create_task(delayed_assistant_leave(chat_id, 180))
@@ -200,6 +229,7 @@ async def main():
             f"🎵 **Now Playing in Voice Chat**\n\n"
             f"📌 **Title:** `{next_song['title']}`\n"
             f"🎤 **Artist:** `{next_song['artist']}`\n"
+            f"👤 **Requested By:** {next_song['requester']}\n"
             f"⏱ **Time:** `00:00 {bar} {next_song['duration_str']}`\n"
             f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
         )
@@ -208,40 +238,26 @@ async def main():
         else:
             msg = await app.send_message(chat_id, caption, reply_markup=get_controls())
 
-        TIMERS[chat_id] = asyncio.create_task(track_timer_and_auto_next(chat_id, msg.id, next_song))
+        TIMERS[chat_id] = asyncio.create_task(update_timeline(chat_id, msg.id, next_song))
 
-    async def track_timer_and_auto_next(chat_id, message_id, song_info):
-        total_sec = song_info["duration_sec"]
-        current_sec = 0
-        while current_sec < total_sec:
-            await asyncio.sleep(10)
-            current_sec += 10
-            if chat_id not in ACTIVE_TRACK or ACTIVE_TRACK[chat_id] != song_info:
-                return
-            bar = get_progress_bar(current_sec, total_sec)
-            played_str = format_sec(min(current_sec, total_sec))
-            caption = (
-                f"🎵 **Now Playing in Voice Chat**\n\n"
-                f"📌 **Title:** `{song_info['title']}`\n"
-                f"🎤 **Artist:** `{song_info['artist']}`\n"
-                f"⏱ **Time:** `{played_str} {bar} {song_info['duration_str']}`\n"
-                f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
-            )
-            try:
-                await app.edit_message_caption(chat_id, message_id, caption=caption, reply_markup=get_controls())
-            except Exception:
-                pass
-        await asyncio.sleep(2)
-        await play_next(chat_id)
+    async def auto_next_checker(chat_id, song_info):
+        await asyncio.sleep(song_info["duration_sec"] + 2)
+        if chat_id in ACTIVE_TRACK and ACTIVE_TRACK[chat_id] == song_info:
+            await play_next(chat_id)
+
+    @call.on_stream_end()
+    async def on_stream_end_handler(client, update: StreamAudioEnded):
+        await play_next(update.chat_id)
 
     @app.on_message(filters.command("play"))
     async def play_music(client, message):
         chat_id = message.chat.id
+        user_mention = message.from_user.mention if message.from_user else "Unknown User"
+        
         if len(message.command) < 2:
             await message.reply_text("❌ **Please provide a song title!**\nExample: `/play Kesariya`")
             return
         
-        # If assistant was about to leave, cancel countdown
         if chat_id in LEAVE_TIMERS:
             LEAVE_TIMERS[chat_id].cancel()
             LEAVE_TIMERS.pop(chat_id, None)
@@ -261,7 +277,8 @@ async def main():
                 "artist": singers,
                 "duration_sec": dur_sec,
                 "duration_str": dur_str,
-                "thumb": thumb
+                "thumb": thumb,
+                "requester": user_mention
             }
             
             if chat_id in ACTIVE_TRACK:
@@ -273,7 +290,9 @@ async def main():
                 await message.reply_text(
                     f" Queued at Position #{pos}\n\n"
                     f"📌 **Title:** `{title}`\n"
-                    f"⏱ **Duration:** `{dur_str}`"
+                    f"👤 **Requested By:** {user_mention}\n"
+                    f"⏱ **Duration:** `{dur_str}`",
+                    reply_markup=get_queue_markup()
                 )
             else:
                 ACTIVE_TRACK[chat_id] = song_obj
@@ -289,6 +308,7 @@ async def main():
                     f"🎵 **Now Playing in Voice Chat**\n\n"
                     f"📌 **Title:** `{title}`\n"
                     f"🎤 **Artist:** `{singers}`\n"
+                    f"👤 **Requested By:** {user_mention}\n"
                     f"⏱ **Time:** `00:00 {bar} {dur_str}`\n"
                     f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
                 )
@@ -297,17 +317,53 @@ async def main():
                 else:
                     msg = await message.reply_text(caption, reply_markup=get_controls())
                     
-                TIMERS[chat_id] = asyncio.create_task(track_timer_and_auto_next(chat_id, msg.id, song_obj))
+                TIMERS[chat_id] = asyncio.create_task(update_timeline(chat_id, msg.id, song_obj))
+                asyncio.create_task(auto_next_checker(chat_id, song_obj))
                     
         except Exception as e:
             await m.edit(f"❌ **Error:** `{str(e)}`")
 
-    @app.on_message(filters.command(["stop", "end"]))
-    async def stop_cmd(client, message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
+    @app.on_message(filters.command(["skip", "next"]))
+    async def skip_cmd(client, message):
+        if not await is_admin(client, message.chat.id, message.from_user.id if message.from_user else 0):
             await message.reply_text("❌ **Only Admins can use this command!**")
             return
         chat_id = message.chat.id
+        user_mention = message.from_user.mention if message.from_user else "Admin"
+        await message.reply_text(f"⏭ **Skipped by {user_mention}!**")
+        await play_next(chat_id)
+
+    @app.on_message(filters.command("pause"))
+    async def pause_cmd(client, message):
+        if not await is_admin(client, message.chat.id, message.from_user.id if message.from_user else 0):
+            await message.reply_text("❌ **Only Admins can use this command!**")
+            return
+        try:
+            await call.pause_stream(message.chat.id)
+            user_mention = message.from_user.mention if message.from_user else "Admin"
+            await message.reply_text(f"⏸ **Paused by {user_mention}.**")
+        except Exception as e:
+            await message.reply_text(f"❌ **Error:** `{str(e)}`")
+
+    @app.on_message(filters.command("resume"))
+    async def resume_cmd(client, message):
+        if not await is_admin(client, message.chat.id, message.from_user.id if message.from_user else 0):
+            await message.reply_text("❌ **Only Admins can use this command!**")
+            return
+        try:
+            await call.resume_stream(message.chat.id)
+            user_mention = message.from_user.mention if message.from_user else "Admin"
+            await message.reply_text(f"▶️ **Resumed by {user_mention}.**")
+        except Exception as e:
+            await message.reply_text(f"❌ **Error:** `{str(e)}`")
+
+    @app.on_message(filters.command(["stop", "end"]))
+    async def stop_cmd(client, message):
+        if not await is_admin(client, message.chat.id, message.from_user.id if message.from_user else 0):
+            await message.reply_text("❌ **Only Admins can use this command!**")
+            return
+        chat_id = message.chat.id
+        user_mention = message.from_user.mention if message.from_user else "Admin"
         if chat_id in QUEUE:
             QUEUE[chat_id].clear()
         ACTIVE_TRACK.pop(chat_id, None)
@@ -323,73 +379,91 @@ async def main():
         if chat_id in LEAVE_TIMERS:
             LEAVE_TIMERS[chat_id].cancel()
         LEAVE_TIMERS[chat_id] = asyncio.create_task(delayed_assistant_leave(chat_id, 180))
-        await message.reply_text("⏹ **Music stopped. Assistant will leave in 3 minutes if no new songs are played.**")
+        await message.reply_text(f"⏹ **Music stopped by {user_mention}. Assistant will leave in 3 mins if inactive.**")
 
-    @app.on_message(filters.command(["skip", "next"]))
-    async def skip_cmd(client, message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
+    @app.on_message(filters.command("shuffle"))
+    async def shuffle_cmd(client, message):
+        if not await is_admin(client, message.chat.id, message.from_user.id if message.from_user else 0):
             await message.reply_text("❌ **Only Admins can use this command!**")
             return
-        await play_next(message.chat.id)
+        chat_id = message.chat.id
+        if chat_id in QUEUE and len(QUEUE[chat_id]) > 1:
+            random.shuffle(QUEUE[chat_id])
+            await message.reply_text("🔀 **Queue order has been randomized!**")
+        else:
+            await message.reply_text("❌ **Not enough tracks to shuffle.**")
 
-    @app.on_message(filters.command("pause"))
-    async def pause_cmd(client, message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
+    @app.on_message(filters.command("loop"))
+    async def loop_cmd(client, message):
+        if not await is_admin(client, message.chat.id, message.from_user.id if message.from_user else 0):
             await message.reply_text("❌ **Only Admins can use this command!**")
             return
-        try:
-            await call.pause_stream(message.chat.id)
-            await message.reply_text("⏸ **Music paused.**")
-        except Exception as e:
-            await message.reply_text(f"❌ **Error:** `{str(e)}`")
-
-    @app.on_message(filters.command("resume"))
-    async def resume_cmd(client, message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            await message.reply_text("❌ **Only Admins can use this command!**")
-            return
-        try:
-            await call.resume_stream(message.chat.id)
-            await message.reply_text("▶️ **Music resumed.**")
-        except Exception as e:
-            await message.reply_text(f"❌ **Error:** `{str(e)}`")
+        chat_id = message.chat.id
+        LOOP_MODE[chat_id] = not LOOP_MODE.get(chat_id, False)
+        st = "Enabled" if LOOP_MODE[chat_id] else "Disabled"
+        await message.reply_text(f"🔂 **Loop mode:** `{st}`")
 
     @app.on_message(filters.command("queue"))
     async def queue_cmd(client, message):
         chat_id = message.chat.id
         if chat_id not in QUEUE or not QUEUE[chat_id]:
-            await message.reply_text("📜 **Queue is empty.**")
+            await message.reply_text("📜 **Queue is empty.**", reply_markup=get_queue_markup())
             return
-        queue_text = "📜 **Upcoming Songs:**\n\n"
+        queue_text = "📜 **Upcoming Songs in Queue:**\n\n"
         for i, song in enumerate(QUEUE[chat_id], 1):
-            queue_text += f"{i}. `{song['title']}` | `{song['duration_str']}`\n"
-        await message.reply_text(queue_text)
+            queue_text += f"{i}. `{song['title']}` | {song['requester']} | `{song['duration_str']}`\n"
+        await message.reply_text(queue_text, reply_markup=get_queue_markup())
 
     @app.on_message(filters.command(["start", "help"]))
     async def help_cmd(client, message):
-        await message.reply_text("🎵 **Bot Commands:**\n`/play [song]` | `/skip` | `/pause` | `/resume` | `/stop` | `/queue` | `/shuffle` | `/loop`")
+        await message.reply_text(
+            "🎵 **Music Bot Commands:**\n\n"
+            "▶️ `/play <song>` - Play in VC (Everyone)\n"
+            "📜 `/queue` - Show upcoming songs (Everyone)\n\n"
+            "🛡 **Admin Only Commands:**\n"
+            "⏸ `/pause` - Pause music\n"
+            "▶️ `/resume` - Resume playback\n"
+            "⏭ `/skip` - Skip current track\n"
+            "⏹ `/stop` - Stop & clear queue\n"
+            "🔀 `/shuffle` - Shuffle queue\n"
+            "🔂 `/loop` - Repeat current track"
+        )
 
+    # Callback Button Handlers
     @app.on_callback_query()
     async def cb_handler(client, query):
         data = query.data
         chat_id = query.message.chat.id
-        user_id = query.from_user.id
+        user_id = query.from_user.id if query.from_user else 0
+        user_mention = query.from_user.mention if query.from_user else "User"
 
+        # Open for everyone (Delete message)
+        if data == "delete_msg":
+            try:
+                await query.message.delete()
+                alert = await app.send_message(chat_id, f"🗑 **Message deleted by {user_mention}.**")
+                await asyncio.sleep(4)
+                await alert.delete()
+            except Exception:
+                await query.answer("Could not delete message.", show_alert=True)
+            return
+
+        # Strictly Admins Only for all audio controls
         if not await is_admin(client, chat_id, user_id):
-            await query.answer("❌ Admins only!", show_alert=True)
+            await query.answer("❌ Only Admins can control playback!", show_alert=True)
             return
 
         if data == "pause_music":
             try:
                 await call.pause_stream(chat_id)
-                await query.answer("⏸ Paused")
+                await query.answer(f"⏸ Paused by {query.from_user.first_name}")
             except Exception:
                 await query.answer("Already paused", show_alert=True)
                 
         elif data == "resume_music":
             try:
                 await call.resume_stream(chat_id)
-                await query.answer("▶️ Resumed")
+                await query.answer(f"▶️ Resumed by {query.from_user.first_name}")
             except Exception:
                 await query.answer("Already playing", show_alert=True)
 
@@ -403,10 +477,11 @@ async def main():
                 random.shuffle(QUEUE[chat_id])
                 await query.answer("🔀 Shuffled", show_alert=True)
             else:
-                await query.answer("Not enough tracks", show_alert=True)
+                await query.answer("Not enough tracks in queue", show_alert=True)
                 
         elif data == "skip_music":
             await query.answer("⏭ Skipping...")
+            await app.send_message(chat_id, f"⏭ **Skipped by Admin {user_mention}!**")
             await play_next(chat_id)
             
         elif data == "stop_music":
@@ -427,7 +502,7 @@ async def main():
                 await query.message.delete()
             except Exception:
                 pass
-            await app.send_message(chat_id, "⏹ **Music stopped. Assistant will leave in 3 minutes if inactive.**")
+            await app.send_message(chat_id, f"⏹ **Music stopped by Admin {user_mention}.**")
 
     await app.start()
     await user.start()
