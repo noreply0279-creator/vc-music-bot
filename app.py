@@ -17,7 +17,12 @@ ydl_ops = {
     'default_search': 'ytsearch1',
     'outtmpl': '%(id)s.%(ext)s',
     'quiet': True,
-    'nocheckcertificate': True
+    'nocheckcertificate': True,
+    'extractor_args': {
+        'youtube': {
+            'player_client': ['android', 'web_creator']
+        }
+    }
 }
 
 def download_audio(query):
@@ -30,7 +35,6 @@ async def handle_ping(request):
     return web.Response(text="Bot is running 24/7!")
 
 async def main():
-    # 1. Sabthi pehla Render no Web Port chalu karvanno (Tena thi Live status malse)
     server = web.Application()
     server.router.add_get("/", handle_ping)
     runner = web.AppRunner(server)
@@ -40,7 +44,6 @@ async def main():
     await site.start()
     print(f"Web server started on port {port}")
 
-    # 2. Pachi Bot ane Assistant start karvana
     app = Client("music_bot_v2", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
     user = Client("assistant_account", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
     call = PyTgCalls(user)
