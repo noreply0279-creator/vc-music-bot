@@ -25,7 +25,6 @@ STRING_SESSION = "BQF8n_YAHma28wBi1V61Ox_f22FGlFmHR5H065LbA-fGnABXwEzB2I6Ci3Ldhx
 
 DES_KEY = b"38346591"
 
-# Memory States
 QUEUE = {}
 ACTIVE_TRACK = {}
 TIMERS = {}
@@ -133,7 +132,7 @@ async def is_admin(client, chat_id, user_id):
     return False
 
 async def handle_ping(request):
-    return web.Response(text="Music Bot is running 24/7!")
+    return web.Response(text="Bot is running!")
 
 async def main():
     server = web.Application()
@@ -252,6 +251,17 @@ async def main():
     @app.on_message(filters.command("play"))
     async def play_music(client, message):
         chat_id = message.chat.id
+        
+        # 1. Check if Bot is Admin in Group
+        try:
+            bot_me = await app.get_me()
+            bot_member = await app.get_chat_member(chat_id, bot_me.id)
+            if bot_member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+                await message.reply_text("⚠️ **I need Admin rights (with Manage Video Chats permission) to invite my Assistant and play music!**")
+                return
+        except Exception:
+            pass
+
         user_mention = message.from_user.mention if message.from_user else "Unknown User"
         
         if len(message.command) < 2:
@@ -437,7 +447,6 @@ async def main():
         user_id = query.from_user.id if query.from_user else 0
         user_mention = query.from_user.mention if query.from_user else "User"
 
-        # Open for everyone (Delete message)
         if data == "delete_msg":
             try:
                 await query.message.delete()
@@ -448,7 +457,6 @@ async def main():
                 await query.answer("Could not delete message.", show_alert=True)
             return
 
-        # Strictly Admins Only for all audio controls
         if not await is_admin(client, chat_id, user_id):
             await query.answer("❌ Only Admins can control playback!", show_alert=True)
             return
