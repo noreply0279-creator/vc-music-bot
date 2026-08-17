@@ -10,7 +10,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pytgcalls import PyTgCalls
 from pytgcalls.types.input_stream import InputStream, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
-from pytgcalls.types.input_stream import AudioParameters
+from pytgcalls.types.stream import StreamAudioEnded
 from Crypto.Cipher import DES
 
 FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
@@ -23,8 +23,10 @@ STRING_SESSION = "BQF8n_YAHma28wBi1V61Ox_f22FGlFmHR5H065LbA-fGnABXwEzB2I6Ci3Ldhx
 
 DES_KEY = b"38346591"
 
-# Queue Memory: {chat_id: [{"path": ..., "title": ..., "artist": ..., "duration": ..., "thumb": ...}]}
+# Memory storage
 QUEUE = {}
+ACTIVE_TRACK = {}
+TIMERS = {}
 
 def decrypt_url(enc_url):
     cipher = DES.new(DES_KEY, DES.MODE_ECB)
@@ -34,6 +36,20 @@ def decrypt_url(enc_url):
     if 0 < pad <= 8:
         url = url[:-pad]
     return url.replace("_96.mp4", "_320.mp4")
+
+def format_sec(sec):
+    mins = sec // 60
+    secs = sec % 60
+    return f"{mins:02d}:{secs:02d}"
+
+def get_progress_bar(current_sec, total_sec):
+    total_bars = 10
+    if total_sec <= 0:
+        return "🔘──────────"
+    progress = int((current_sec / total_sec) * total_bars)
+    progress = min(max(progress, 0), total_bars)
+    bar = "━" * progress + "🔘" + "─" * (total_bars - progress)
+    return bar
 
 def download_and_convert(query):
     search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query={query}"
@@ -58,9 +74,7 @@ def download_and_convert(query):
         raise Exception("Unable to get song details.")
 
     duration_sec = int(song_data.get("duration", 0))
-    mins = duration_sec // 60
-    secs = duration_sec % 60
-    duration_str = f"{mins:02d}:{secs:02d}"
+    duration_str = format_sec(duration_sec)
 
     encrypted_media_url = song_data.get("encrypted_media_url")
     stream_url = decrypt_url(encrypted_media_url)
@@ -82,7 +96,7 @@ def download_and_convert(query):
     if os.path.exists(mp3_file):
         os.remove(mp3_file)
         
-    return raw_file, title, singers, duration_str, thumb
+    return raw_file, title, singers, duration_sec, duration_str, thumb
 
 def get_controls():
     return InlineKeyboardMarkup([
@@ -112,31 +126,66 @@ async def main():
     user = Client("assistant_account", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
     call = PyTgCalls(user)
 
+    async def update_timeline(chat_id, message_id, song_info):
+        total_sec = song_info["duration_sec"]
+        current_sec = 0
+        while current_sec <= total_sec:
+            await asyncio.sleep(10)
+            current_sec += 10
+            if chat_id not in ACTIVE_TRACK or ACTIVE_TRACK[chat_id] != song_info:
+                break
+            bar = get_progress_bar(current_sec, total_sec)
+            played_str = format_sec(min(current_sec, total_sec))
+            
+            caption = (
+                f"🎵 **Now Playing in Voice Chat**\n\n"
+                f"📌 **Title:** `{song_info['title']}`\n"
+                f"🎤 **Artist:** `{song_info['artist']}`\n"
+                f"⏱ **Time:** `{played_str} {bar} {song_info['duration_str']}`\n"
+                f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
+            )
+            try:
+                await app.edit_message_caption(chat_id, message_id, caption=caption, reply_markup=get_controls())
+            except Exception:
+                pass
+
     async def play_next(chat_id):
+        if chat_id in TIMERS:
+            TIMERS[chat_id].cancel()
+            
         if chat_id in QUEUE and QUEUE[chat_id]:
             next_song = QUEUE[chat_id].pop(0)
+            ACTIVE_TRACK[chat_id] = next_song
             stream = InputStream(InputAudioStream(next_song["path"], HighQualityAudio()))
             try:
                 await call.change_stream(chat_id, stream)
             except Exception:
                 await call.join_group_call(chat_id, stream)
             
+            bar = get_progress_bar(0, next_song["duration_sec"])
             caption = (
                 f"🎵 **Now Playing in Voice Chat**\n\n"
                 f"📌 **Title:** `{next_song['title']}`\n"
                 f"🎤 **Artist:** `{next_song['artist']}`\n"
-                f"⏱ **Duration:** `{next_song['duration']}`\n"
+                f"⏱ **Time:** `00:00 {bar} {next_song['duration_str']}`\n"
                 f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
             )
             if next_song["thumb"]:
-                await app.send_photo(chat_id, photo=next_song["thumb"], caption=caption, reply_markup=get_controls())
+                msg = await app.send_photo(chat_id, photo=next_song["thumb"], caption=caption, reply_markup=get_controls())
             else:
-                await app.send_message(chat_id, caption, reply_markup=get_controls())
+                msg = await app.send_message(chat_id, caption, reply_markup=get_controls())
+                
+            TIMERS[chat_id] = asyncio.create_task(update_timeline(chat_id, msg.id, next_song))
         else:
+            ACTIVE_TRACK.pop(chat_id, None)
             try:
                 await call.leave_group_call(chat_id)
             except Exception:
                 pass
+
+    @call.on_stream_end()
+    async def on_stream_end_handler(client, update: StreamAudioEnded):
+        await play_next(update.chat_id)
 
     @app.on_message(filters.command(["start", "ping"]))
     async def start_cmd(client, message):
@@ -151,26 +200,19 @@ async def main():
         m = await message.reply_text(f"🔎 **Searching & Downloading:** `{query}`...")
         try:
             loop = asyncio.get_running_loop()
-            raw_path, title, singers, duration, thumb = await loop.run_in_executor(None, download_and_convert, query)
+            raw_path, title, singers, dur_sec, dur_str, thumb = await loop.run_in_executor(None, download_and_convert, query)
             chat_id = message.chat.id
             
             song_obj = {
                 "path": raw_path,
                 "title": title,
                 "artist": singers,
-                "duration": duration,
+                "duration_sec": dur_sec,
+                "duration_str": dur_str,
                 "thumb": thumb
             }
             
-            is_playing = False
-            try:
-                active_calls = call.active_calls
-                if chat_id in active_calls:
-                    is_playing = True
-            except Exception:
-                pass
-
-            if is_playing:
+            if chat_id in ACTIVE_TRACK:
                 if chat_id not in QUEUE:
                     QUEUE[chat_id] = []
                 QUEUE[chat_id].append(song_obj)
@@ -179,9 +221,10 @@ async def main():
                 await message.reply_text(
                     f" Queued at Position #{pos}\n\n"
                     f"📌 **Title:** `{title}`\n"
-                    f"⏱ **Duration:** `{duration}`"
+                    f"⏱ **Duration:** `{dur_str}`"
                 )
             else:
+                ACTIVE_TRACK[chat_id] = song_obj
                 stream = InputStream(InputAudioStream(raw_path, HighQualityAudio()))
                 try:
                     await call.join_group_call(chat_id, stream)
@@ -189,20 +232,34 @@ async def main():
                     await call.change_stream(chat_id, stream)
                 
                 await m.delete()
+                bar = get_progress_bar(0, dur_sec)
                 caption = (
                     f"🎵 **Now Playing in Voice Chat**\n\n"
                     f"📌 **Title:** `{title}`\n"
                     f"🎤 **Artist:** `{singers}`\n"
-                    f"⏱ **Duration:** `{duration}`\n"
+                    f"⏱ **Time:** `00:00 {bar} {dur_str}`\n"
                     f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
                 )
                 if thumb:
-                    await message.reply_photo(photo=thumb, caption=caption, reply_markup=get_controls())
+                    msg = await message.reply_photo(photo=thumb, caption=caption, reply_markup=get_controls())
                 else:
-                    await message.reply_text(caption, reply_markup=get_controls())
+                    msg = await message.reply_text(caption, reply_markup=get_controls())
+                    
+                TIMERS[chat_id] = asyncio.create_task(update_timeline(chat_id, msg.id, song_obj))
                     
         except Exception as e:
             await m.edit(f"❌ **Error:** `{str(e)}`")
+
+    @app.on_message(filters.command("queue"))
+    async def queue_cmd(client, message):
+        chat_id = message.chat.id
+        if chat_id not in QUEUE or not QUEUE[chat_id]:
+            await message.reply_text("📜 **Queue is currently empty.**")
+            return
+        queue_text = "📜 **Upcoming Songs in Queue:**\n\n"
+        for i, song in enumerate(QUEUE[chat_id], 1):
+            queue_text += f"{i}. `{song['title']}` | `{song['duration_str']}`\n"
+        await message.reply_text(queue_text)
 
     @app.on_message(filters.command("pause"))
     async def pause_cmd(client, message):
@@ -224,12 +281,13 @@ async def main():
     async def skip_cmd(client, message):
         chat_id = message.chat.id
         if chat_id in QUEUE and QUEUE[chat_id]:
-            await message.reply_text("⏭ **Skipping to next song...**")
+            await message.reply_text("⏭ **Skipping to next track...**")
             await play_next(chat_id)
         else:
+            ACTIVE_TRACK.pop(chat_id, None)
             try:
                 await call.leave_group_call(chat_id)
-                await message.reply_text("⏹ **Queue empty. Stream ended.**")
+                await message.reply_text("⏹ **Queue is empty. Stream ended.**")
             except Exception:
                 pass
 
@@ -238,13 +296,15 @@ async def main():
         chat_id = message.chat.id
         if chat_id in QUEUE:
             QUEUE[chat_id].clear()
+        ACTIVE_TRACK.pop(chat_id, None)
+        if chat_id in TIMERS:
+            TIMERS[chat_id].cancel()
         try:
             await call.leave_group_call(chat_id)
             await message.reply_text("⏹ **Music stopped and cleared queue.**")
         except Exception as e:
             await message.reply_text(f"❌ **Error:** `{str(e)}`")
 
-    # Callback Button Handlers
     @app.on_callback_query()
     async def cb_handler(client, query):
         data = query.data
@@ -271,6 +331,9 @@ async def main():
         elif data == "stop_music":
             if chat_id in QUEUE:
                 QUEUE[chat_id].clear()
+            ACTIVE_TRACK.pop(chat_id, None)
+            if chat_id in TIMERS:
+                TIMERS[chat_id].cancel()
             try:
                 await call.leave_group_call(chat_id)
                 await query.message.delete()
