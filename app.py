@@ -10,6 +10,7 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pytgcalls import PyTgCalls
 from pytgcalls.types.input_stream import InputStream, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
+from pytgcalls.types.input_stream import AudioParameters
 from Crypto.Cipher import DES
 
 FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
@@ -21,6 +22,9 @@ BOT_TOKEN = "8663631826:AAGHpKJH9vKkaFast9VpKjUFJ6PWNpFLvKs"
 STRING_SESSION = "BQF8n_YAHma28wBi1V61Ox_f22FGlFmHR5H065LbA-fGnABXwEzB2I6Ci3Ldhx8NDy9oZ5u6csQjwJ5JGNjv2m-ksVf5zBai4YN8Fa6UEWY83UE3yMbvZgsjtn6Xf89RNIsu2x7TeAEXBaKiF7du1l2nk0N8cm2jLP7bALQ0eVAdJ00GXnqIlGAhioBVcCwfZiXg5snIflglNa8ObUJJJhEubN-dDxfnMYOe8wQmngIMERiqOPS0ZKWamMkwLXWb7ljiY9-KTFN6R1az2ok6Vt0Fb9v_mMge4o0YWejF4D8En9TahcCJt_xt2rzNaF8xARSifoNY4cScOBt5bkyCArweSe_1FAAAAAHyu8ZdAA"
 
 DES_KEY = b"38346591"
+
+# Queue Memory: {chat_id: [{"path": ..., "title": ..., "artist": ..., "duration": ..., "thumb": ...}]}
+QUEUE = {}
 
 def decrypt_url(enc_url):
     cipher = DES.new(DES_KEY, DES.MODE_ECB)
@@ -43,6 +47,7 @@ def download_and_convert(query):
     song_id = songs[0].get("id")
     title = songs[0].get("title", "Song").replace("&quot;", '"').replace("&amp;", "&")
     singers = songs[0].get("more_info", {}).get("singers", "Artist")
+    thumb = songs[0].get("image", "").replace("50x50", "500x500").replace("150x150", "500x500")
 
     detail_url = f"https://www.jiosaavn.com/api.php?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0&_format=json&pids={song_id}"
     r_detail = requests.get(detail_url, headers=headers, timeout=10)
@@ -67,24 +72,32 @@ def download_and_convert(query):
     with open(mp3_file, "wb") as f:
         f.write(audio_req.content)
         
-    # PyTgCalls 0.9.x exact native specification: 48000Hz Mono S16LE PCM
     cmd = [
         FFMPEG_BIN, "-y", "-i", mp3_file,
-        "-f", "s16le",
-        "-ac", "1",
-        "-ar", "48000",
-        "-acodec", "pcm_s16le",
-        raw_file
+        "-f", "s16le", "-ac", "1", "-ar", "48000",
+        "-acodec", "pcm_s16le", raw_file
     ]
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     if os.path.exists(mp3_file):
         os.remove(mp3_file)
         
-    return raw_file, title, singers, duration_str
+    return raw_file, title, singers, duration_str, thumb
+
+def get_controls():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⏸ Pause", callback_data="pause_music"),
+            InlineKeyboardButton("▶️ Resume", callback_data="resume_music")
+        ],
+        [
+            InlineKeyboardButton("⏭ Skip", callback_data="skip_music"),
+            InlineKeyboardButton("⏹ Stop", callback_data="stop_music")
+        ]
+    ])
 
 async def handle_ping(request):
-    return web.Response(text="Bot is live 24/7!")
+    return web.Response(text="Music Bot is running 24/7!")
 
 async def main():
     server = web.Application()
@@ -99,9 +112,35 @@ async def main():
     user = Client("assistant_account", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
     call = PyTgCalls(user)
 
+    async def play_next(chat_id):
+        if chat_id in QUEUE and QUEUE[chat_id]:
+            next_song = QUEUE[chat_id].pop(0)
+            stream = InputStream(InputAudioStream(next_song["path"], HighQualityAudio()))
+            try:
+                await call.change_stream(chat_id, stream)
+            except Exception:
+                await call.join_group_call(chat_id, stream)
+            
+            caption = (
+                f"🎵 **Now Playing in Voice Chat**\n\n"
+                f"📌 **Title:** `{next_song['title']}`\n"
+                f"🎤 **Artist:** `{next_song['artist']}`\n"
+                f"⏱ **Duration:** `{next_song['duration']}`\n"
+                f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
+            )
+            if next_song["thumb"]:
+                await app.send_photo(chat_id, photo=next_song["thumb"], caption=caption, reply_markup=get_controls())
+            else:
+                await app.send_message(chat_id, caption, reply_markup=get_controls())
+        else:
+            try:
+                await call.leave_group_call(chat_id)
+            except Exception:
+                pass
+
     @app.on_message(filters.command(["start", "ping"]))
     async def start_cmd(client, message):
-        await message.reply_text("✅ **Bot is active and running!**\nUse `/play [song name]` to stream in Voice Chat.")
+        await message.reply_text("✅ **Bot is online and active!**\nUse `/play [song name]` to start streaming music.")
 
     @app.on_message(filters.command("play"))
     async def play_music(client, message):
@@ -109,49 +148,135 @@ async def main():
             await message.reply_text("❌ **Please provide a song title!**\nExample: `/play Kesariya`")
             return
         query = message.text.split(None, 1)[1]
-        m = await message.reply_text(f"🔎 **Searching & Preparing:** `{query}`...")
+        m = await message.reply_text(f"🔎 **Searching & Downloading:** `{query}`...")
         try:
             loop = asyncio.get_running_loop()
-            raw_path, title, singers, duration = await loop.run_in_executor(None, download_and_convert, query)
+            raw_path, title, singers, duration, thumb = await loop.run_in_executor(None, download_and_convert, query)
+            chat_id = message.chat.id
             
-            stream = InputStream(
-                InputAudioStream(
-                    raw_path,
-                    HighQualityAudio(),
-                )
-            )
+            song_obj = {
+                "path": raw_path,
+                "title": title,
+                "artist": singers,
+                "duration": duration,
+                "thumb": thumb
+            }
             
+            is_playing = False
             try:
-                await call.join_group_call(message.chat.id, stream)
+                active_calls = call.active_calls
+                if chat_id in active_calls:
+                    is_playing = True
             except Exception:
-                await call.change_stream(message.chat.id, stream)
-            
-            buttons = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("⏹ Stop", callback_data="stop_music"),
-                    InlineKeyboardButton("⏭ Skip", callback_data="stop_music")
-                ]
-            ])
-            
-            caption = (
-                f"🎵 **Now Playing in Voice Chat**\n\n"
-                f"📌 **Title:** `{title}`\n"
-                f"🎤 **Artist:** `{singers}`\n"
-                f"⏱ **Duration:** `{duration}`\n"
-                f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
-            )
-            await m.edit(caption, reply_markup=buttons)
-            
+                pass
+
+            if is_playing:
+                if chat_id not in QUEUE:
+                    QUEUE[chat_id] = []
+                QUEUE[chat_id].append(song_obj)
+                pos = len(QUEUE[chat_id])
+                await m.delete()
+                await message.reply_text(
+                    f" Queued at Position #{pos}\n\n"
+                    f"📌 **Title:** `{title}`\n"
+                    f"⏱ **Duration:** `{duration}`"
+                )
+            else:
+                stream = InputStream(InputAudioStream(raw_path, HighQualityAudio()))
+                try:
+                    await call.join_group_call(chat_id, stream)
+                except Exception:
+                    await call.change_stream(chat_id, stream)
+                
+                await m.delete()
+                caption = (
+                    f"🎵 **Now Playing in Voice Chat**\n\n"
+                    f"📌 **Title:** `{title}`\n"
+                    f"🎤 **Artist:** `{singers}`\n"
+                    f"⏱ **Duration:** `{duration}`\n"
+                    f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
+                )
+                if thumb:
+                    await message.reply_photo(photo=thumb, caption=caption, reply_markup=get_controls())
+                else:
+                    await message.reply_text(caption, reply_markup=get_controls())
+                    
         except Exception as e:
             await m.edit(f"❌ **Error:** `{str(e)}`")
 
-    @app.on_callback_query(filters.regex("stop_music"))
-    async def stop_cb(client, callback_query):
+    @app.on_message(filters.command("pause"))
+    async def pause_cmd(client, message):
         try:
-            await call.leave_group_call(callback_query.message.chat.id)
-            await callback_query.message.edit("⏹ **Music stopped and Left Voice Chat.**")
-        except Exception:
-            await callback_query.answer("Stream already stopped.", show_alert=True)
+            await call.pause_stream(message.chat.id)
+            await message.reply_text("⏸ **Music has been paused.**")
+        except Exception as e:
+            await message.reply_text(f"❌ **Error:** `{str(e)}`")
+
+    @app.on_message(filters.command("resume"))
+    async def resume_cmd(client, message):
+        try:
+            await call.resume_stream(message.chat.id)
+            await message.reply_text("▶️ **Music has been resumed.**")
+        except Exception as e:
+            await message.reply_text(f"❌ **Error:** `{str(e)}`")
+
+    @app.on_message(filters.command(["skip", "next"]))
+    async def skip_cmd(client, message):
+        chat_id = message.chat.id
+        if chat_id in QUEUE and QUEUE[chat_id]:
+            await message.reply_text("⏭ **Skipping to next song...**")
+            await play_next(chat_id)
+        else:
+            try:
+                await call.leave_group_call(chat_id)
+                await message.reply_text("⏹ **Queue empty. Stream ended.**")
+            except Exception:
+                pass
+
+    @app.on_message(filters.command(["stop", "end"]))
+    async def stop_cmd(client, message):
+        chat_id = message.chat.id
+        if chat_id in QUEUE:
+            QUEUE[chat_id].clear()
+        try:
+            await call.leave_group_call(chat_id)
+            await message.reply_text("⏹ **Music stopped and cleared queue.**")
+        except Exception as e:
+            await message.reply_text(f"❌ **Error:** `{str(e)}`")
+
+    # Callback Button Handlers
+    @app.on_callback_query()
+    async def cb_handler(client, query):
+        data = query.data
+        chat_id = query.message.chat.id
+        
+        if data == "pause_music":
+            try:
+                await call.pause_stream(chat_id)
+                await query.answer("⏸ Paused")
+            except Exception:
+                await query.answer("Already paused", show_alert=True)
+                
+        elif data == "resume_music":
+            try:
+                await call.resume_stream(chat_id)
+                await query.answer("▶️ Resumed")
+            except Exception:
+                await query.answer("Already playing", show_alert=True)
+                
+        elif data == "skip_music":
+            await query.answer("⏭ Skipping...")
+            await play_next(chat_id)
+            
+        elif data == "stop_music":
+            if chat_id in QUEUE:
+                QUEUE[chat_id].clear()
+            try:
+                await call.leave_group_call(chat_id)
+                await query.message.delete()
+                await app.send_message(chat_id, "⏹ **Music stopped and Left Voice Chat.**")
+            except Exception:
+                await query.answer("Already stopped", show_alert=True)
 
     await app.start()
     await user.start()
