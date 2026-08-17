@@ -60,6 +60,26 @@ if __name__ == "__main__":
             title = video_data.get('title', 'Music')
 
         await m.edit(f"▶️ **Voice Chat me baj raha hai:** `{title}`")
+        await call.play(chat_id, MediaStream(file_path))
+
+    except Exception as e:
+        await m.edit(f"❌ Error: {str(e)}")
+
+async def start_services():
+    await app.start()
+    await user.start()
+    await call.start()
+    print("\nBot aur Assistant VC ke liye ready hain!")
+    await asyncio.Event().wait()
+
+if __name__ == "__main__":
+    asyncio.run(start_services())
+            info_dict = ydl.extract_info(query, download=True)
+            video_data = info_dict['entries'][0] if 'entries' in info_dict else info_dict
+            file_path = ydl.prepare_filename(video_data)
+            title = video_data.get('title', 'Music')
+
+        await m.edit(f"▶️ **Voice Chat me baj raha hai:** `{title}`")
         await call.play(chat_id, AudioPiped(file_path))
 
     except Exception as e:
