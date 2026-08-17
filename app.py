@@ -1,6 +1,6 @@
 import os
 import asyncio
-import aiohttp
+import requests
 from aiohttp import web
 from pyrogram import Client, filters
 from pytgcalls import PyTgCalls
@@ -12,24 +12,22 @@ API_HASH = "49d2337722244115abf15a4bc9d86eb3"
 BOT_TOKEN = "8663631826:AAGHpKJH9vKkaFast9VpKjUFJ6PWNpFLvKs"
 STRING_SESSION = "BQF8n_YAHma28wBi1V61Ox_f22FGlFmHR5H065LbA-fGnABXwEzB2I6Ci3Ldhx8NDy9oZ5u6csQjwJ5JGNjv2m-ksVf5zBai4YN8Fa6UEWY83UE3yMbvZgsjtn6Xf89RNIsu2x7TeAEXBaKiF7du1l2nk0N8cm2jLP7bALQ0eVAdJ00GXnqIlGAhioBVcCwfZiXg5snIflglNa8ObUJJJhEubN-dDxfnMYOe8wQmngIMERiqOPS0ZKWamMkwLXWb7ljiY9-KTFN6R1az2ok6Vt0Fb9v_mMge4o0YWejF4D8En9TahcCJt_xt2rzNaF8xARSifoNY4cScOBt5bkyCArweSe_1FAAAAAHyu8ZdAA"
 
-async def fetch_song_stream(query):
-    api_url = f"https://saavn.dev/api/search/songs?query={query}&page=1&limit=1"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(api_url) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                results = data.get("data", {}).get("results", [])
-                if results:
-                    song = results[0]
-                    title = song.get("name", "Music")
-                    download_urls = song.get("downloadUrl", [])
-                    if download_urls:
-                        stream_url = download_urls[-1].get("url")
-                        return stream_url, title
-    raise Exception("Gaana nahi mila!")
+def get_jiosaavn_song(query):
+    url = f"https://jiosaavn-api-unofficial.vercel.app/api/search/songs?query={query}"
+    r = requests.get(url, timeout=10)
+    if r.status_code == 200:
+        data = r.json()
+        results = data.get("data", {}).get("results", [])
+        if results:
+            song = results[0]
+            title = song.get("name", "Song")
+            download_urls = song.get("downloadUrl", [])
+            if download_urls:
+                return download_urls[-1].get("url"), title
+    raise Exception("Gaano na malyo! Bijoo gaano try karo.")
 
 async def handle_ping(request):
-    return web.Response(text="Bot is running 24/7!")
+    return web.Response(text="Bot is live 24/7!")
 
 async def main():
     server = web.Application()
@@ -39,7 +37,6 @@ async def main():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Web server started on port {port}")
 
     app = Client("music_bot_v2", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
     user = Client("assistant_account", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
@@ -47,18 +44,19 @@ async def main():
 
     @app.on_message(filters.command(["start", "ping"]))
     async def start_cmd(client, message):
-        await message.reply_text("✅ Bot bilkul active chhe! Gaano vagadva mate `/play [song name]` lakho.")
+        await message.reply_text("✅ Bot active chhe! VC ma gaano vagadva `/play [gaana nu naam]` lakho.")
 
     @app.on_message(filters.command("play"))
     async def play_music(client, message):
         if len(message.command) < 2:
-            await message.reply_text("❌ Kripya gaana nu naam lakho! Example: `/play Kesariya`")
+            await message.reply_text("❌ Gaana nu naam lakho! Example: `/play Kesariya`")
             return
         query = message.text.split(None, 1)[1]
         m = await message.reply_text(f"🔎 `{query}` search thai rahyu chhe...")
         try:
-            stream_url, title = await fetch_song_stream(query)
-            await m.edit(f"▶️ **Voice Chat ma vaagi rahyu chhe:** `{title}`")
+            loop = asyncio.get_running_loop()
+            stream_url, title = await loop.run_in_executor(None, get_jiosaavn_song, query)
+            await m.edit(f"▶️ **Voice Chat ma vaage chhe:** `{title}`")
             await call.join_group_call(
                 message.chat.id,
                 InputStream(
@@ -74,7 +72,6 @@ async def main():
     await app.start()
     await user.start()
     await call.start()
-    print("\nBot aur Assistant ready!")
 
     await asyncio.Event().wait()
 
