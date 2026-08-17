@@ -30,13 +30,17 @@ def download_audio(query):
         data = info['entries'][0] if 'entries' in info else info
         return ydl.prepare_filename(data), data.get('title', 'Music')
 
-@app.on_message(filters.command("play") & filters.group)
+@app.on_message(filters.command(["start", "ping"]))
+async def start_cmd(client, message):
+    await message.reply_text("✅ Bot bilkul active aur live hai! VC me gaana chalane ke liye `/play [gaane ka naam]` bhejein.")
+
+@app.on_message(filters.command("play"))
 async def play_music(client, message):
     if len(message.command) < 2:
-        await message.reply_text("❌ Gaane ka naam likhein! Example: `/play Kesariya`")
+        await message.reply_text("❌ Kripya gaane ka naam likhein! Example: `/play Kesariya`")
         return
     query = message.text.split(None, 1)[1]
-    m = await message.reply_text("🔎 Gaana search ho raha hai...")
+    m = await message.reply_text(f"🔎 `{query}` search ho raha hai...")
     try:
         loop = asyncio.get_running_loop()
         file_path, title = await loop.run_in_executor(None, download_audio, query)
@@ -60,7 +64,7 @@ async def start_services():
     await app.start()
     await user.start()
     await call.start()
-    print("\nBot aur Assistant VC ke liye ready hain!")
+    print("\nBot aur Assistant dono successfully ready hain!")
     
     server = web.Application()
     server.router.add_get("/", handle_ping)
@@ -69,7 +73,6 @@ async def start_services():
     port = int(os.environ.get("PORT", 8080))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"Web server started on port {port}")
     
     await asyncio.Event().wait()
 
