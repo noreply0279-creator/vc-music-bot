@@ -1,7 +1,8 @@
 import asyncio
-from hydrogram import Client, filters
+from pyrogram import Client, filters
 from pytgcalls import PyTgCalls
-from pytgcalls.types import MediaStream
+from pytgcalls.types.input_stream import InputStream, InputAudioStream
+from pytgcalls.types.input_stream.quality import HighQualityAudio
 import yt_dlp
 
 API_ID = 24944630
@@ -38,7 +39,15 @@ async def play_music(client, message):
         loop = asyncio.get_running_loop()
         file_path, title = await loop.run_in_executor(None, download_audio, query)
         await m.edit(f"▶️ **Voice Chat me baj raha hai:** `{title}`")
-        await call.play(message.chat.id, MediaStream(file_path))
+        await call.join_group_call(
+            message.chat.id,
+            InputStream(
+                InputAudioStream(
+                    file_path,
+                    HighQualityAudio(),
+                )
+            )
+        )
     except Exception as e:
         await m.edit(f"❌ Error: {str(e)}")
 
