@@ -10,7 +10,6 @@ from pytgcalls.types.input_stream import InputStream, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
 from Crypto.Cipher import DES
 
-# Set FFmpeg binary environment variable
 os.environ["PATH"] += os.pathsep + os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
 
 API_ID = 24944630
@@ -29,14 +28,14 @@ def decrypt_url(enc_url):
         url = url[:-pad]
     return url.replace("_96.mp4", "_320.mp4")
 
-def fetch_saavn_direct(query):
+def download_track(query):
     search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query={query}"
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(search_url, headers=headers, timeout=10)
     data = r.json()
     songs = data.get("songs", {}).get("data", [])
     if not songs:
-        raise Exception("Song not found! Please check spelling.")
+        raise Exception("Song not found! Check spelling.")
     
     song_id = songs[0].get("id")
     title = songs[0].get("title", "Song").replace("&quot;", '"').replace("&amp;", "&")
@@ -47,11 +46,17 @@ def fetch_saavn_direct(query):
     
     song_data = detail_data.get(song_id)
     if not song_data:
-        raise Exception("Unable to retrieve audio stream.")
+        raise Exception("Unable to get song details.")
 
     encrypted_media_url = song_data.get("encrypted_media_url")
     stream_url = decrypt_url(encrypted_media_url)
-    return stream_url, title
+    
+    file_path = f"song_{song_id}.mp3"
+    audio_req = requests.get(stream_url, headers=headers, timeout=20)
+    with open(file_path, "wb") as f:
+        f.write(audio_req.content)
+        
+    return file_path, title
 
 async def handle_ping(request):
     return web.Response(text="Bot is running 24/7!")
@@ -79,18 +84,17 @@ async def main():
             await message.reply_text("❌ **Please provide a song title!**\nExample: `/play Kesariya`")
             return
         query = message.text.split(None, 1)[1]
-        m = await message.reply_text(f"🔎 **Searching for:** `{query}`...")
+        m = await message.reply_text(f"🔎 **Downloading & Playing:** `{query}`...")
         try:
             loop = asyncio.get_running_loop()
-            stream_url, title = await loop.run_in_executor(None, fetch_saavn_direct, query)
-            await m.edit(f"▶️ **Now Playing in Voice Chat:** `{title}`")
+            file_path, title = await loop.run_in_executor(None, download_track, query)
             
             try:
                 await call.join_group_call(
                     message.chat.id,
                     InputStream(
                         InputAudioStream(
-                            stream_url,
+                            file_path,
                             HighQualityAudio(),
                         )
                     )
@@ -100,11 +104,12 @@ async def main():
                     message.chat.id,
                     InputStream(
                         InputAudioStream(
-                            stream_url,
+                            file_path,
                             HighQualityAudio(),
                         )
                     )
                 )
+            await m.edit(f"▶️ **Now Playing in Voice Chat:** `{title}`")
         except Exception as e:
             await m.edit(f"❌ **Error:** `{str(e)}`")
 
