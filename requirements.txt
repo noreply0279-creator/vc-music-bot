@@ -1,0 +1,5 @@
+pyrogram
+tgcrypto
+pytgcalls==1.0.0
+yt-dlp
+asyncio
