@@ -3,3 +3,4 @@ py-tgcalls==0.9.7
 tgcrypto
 requests
 pycryptodome
+imageio-ffmpeg
