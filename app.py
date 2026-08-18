@@ -5,6 +5,7 @@ import base64
 import subprocess
 import aiohttp
 from aiohttp import web
+import pyrogram
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.enums import ChatMemberStatus
@@ -94,9 +95,13 @@ async def async_download_and_convert(query, start_sec=0):
 
         if not os.path.exists(mp3_file):
             async with session.get(stream_url, timeout=25) as audio_r:
-                content = await audio_r.read()
                 with open(mp3_file, "wb") as f:
-                    f.write(content)
+                    while True:
+                        chunk = await audio_r.content.read(16384)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        await asyncio.sleep(0.001)
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, run_ffmpeg_convert, mp3_file, raw_file, start_sec)
@@ -249,6 +254,31 @@ async def main():
     async def stream_end(client, update: StreamAudioEnded):
         await play_next(update.chat_id)
 
+    @app.on_message(filters.command(["start", "help"]))
+    async def start_help_cmd(client, message):
+        user_mention = message.from_user.mention if message.from_user else "Friend"
+        help_text = (
+            f"👋 **Hey {user_mention}! I am 𓆩⚡𝙎𝙤𝙣𝙞𝙘𝙓⚡𓆪 Music Bot.**\n\n"
+            "✨ **Available Commands:**\n\n"
+            "▶️ `/play <song>` - Play music in VC (Everyone)\n"
+            "📜 `/queue` - Show song queue (Everyone)\n\n"
+            "🛡 **Admin Commands:**\n"
+            "⏸ `/pause` - Pause music\n"
+            "▶️ `/resume` - Resume music\n"
+            "⏭ `/skip` - Skip current track\n"
+            "⏹ `/stop` - Stop & clear queue\n"
+            "🔀 `/shuffle` - Shuffle queue\n"
+            "🔂 `/loop` - Loop current track\n"
+            "🔄 `/reload` - Sync VC & refresh Admin cache\n\n"
+            "💡 *Tip: Make sure to promote me as Admin with 'Manage Video Chats' permission!*"
+        )
+        await message.reply_text(
+            help_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("➕ Add Me To Your Group ➕", url=f"https://t.me/{(await app.get_me()).username}?startgroup=true")]
+            ])
+        )
+
     @app.on_message(filters.command("play"))
     async def play_cmd(client, message):
         chat_id = message.chat.id
@@ -353,7 +383,7 @@ async def main():
     @app.on_message(filters.command(["skip", "pause", "resume", "stop", "shuffle", "loop"]))
     async def admin_cmds(client, m):
         if not await is_admin(client, m.chat.id, m.from_user.id if m.from_user else 0):
-            return await m.reply_text("❌ **Only Admins can use this command!**")
+            return await message.reply_text("❌ **Only Admins can use this command!**")
         cmd = m.command[0]
         if cmd == "skip":
             await play_next(m.chat.id)
