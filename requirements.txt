@@ -4,3 +4,5 @@ tgcrypto
 requests
 pycryptodome
 imageio-ffmpeg
+aiohttp
+asyncio
