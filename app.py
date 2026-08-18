@@ -26,6 +26,8 @@ DES_KEY = b"38346591"
 
 QUEUE = {}
 ACTIVE_TRACK = {}
+PLAYED_TIME = {}
+ADMIN_CACHE = {}
 TIMERS = {}
 LEAVE_TIMERS = {}
 LOOP_MODE = {}
@@ -52,7 +54,7 @@ def get_progress_bar(current_sec, total_sec):
     progress = min(max(progress, 0), total_bars)
     return "━" * progress + "🔘" + "─" * (total_bars - progress)
 
-def download_and_convert(query):
+def download_and_convert(query, start_sec=0):
     search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query={query}"
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(search_url, headers=headers, timeout=10)
@@ -72,20 +74,24 @@ def download_and_convert(query):
     duration_sec = int(song_data.get("duration", 0))
     stream_url = decrypt_url(song_data.get("encrypted_media_url"))
     
-    mp3_file, raw_file = f"t_{song_id}.mp3", f"t_{song_id}.raw"
-    with open(mp3_file, "wb") as f:
-        f.write(requests.get(stream_url, headers=headers, timeout=25).content)
+    mp3_file = f"t_{song_id}.mp3"
+    raw_file = f"t_{song_id}_{start_sec}.raw"
+    
+    if not os.path.exists(mp3_file):
+        with open(mp3_file, "wb") as f:
+            f.write(requests.get(stream_url, headers=headers, timeout=25).content)
         
-    subprocess.run([
-        FFMPEG_BIN, "-y", "-i", mp3_file,
+    cmd = [FFMPEG_BIN, "-y"]
+    if start_sec > 0:
+        cmd.extend(["-ss", str(start_sec)])
+    cmd.extend([
+        "-i", mp3_file,
         "-f", "s16le", "-ac", "1", "-ar", "48000",
         "-acodec", "pcm_s16le", raw_file
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ])
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
-    if os.path.exists(mp3_file):
-        os.remove(mp3_file)
-        
-    return raw_file, title, singers, duration_sec, format_sec(duration_sec), thumb
+    return raw_file, title, singers, duration_sec, format_sec(duration_sec), thumb, mp3_file
 
 def get_controls():
     return InlineKeyboardMarkup([
@@ -97,12 +103,31 @@ def get_controls():
 def get_queue_markup():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🗑 Delete This", "delete_msg")]])
 
+async def reload_admin_cache(client, chat_id):
+    try:
+        admins = []
+        async for m in client.get_chat_members(chat_id, filter=pyrogram.enums.ChatMembersFilter.ADMINISTRATORS):
+            admins.append(m.user.id)
+        ADMIN_CACHE[chat_id] = admins
+        return admins
+    except Exception:
+        return []
+
 async def is_admin(client, chat_id, user_id):
+    if not user_id:
+        return False
+    if chat_id in ADMIN_CACHE and user_id in ADMIN_CACHE[chat_id]:
+        return True
     try:
         member = await client.get_chat_member(chat_id, user_id)
-        return member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
+        if member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            if chat_id not in ADMIN_CACHE:
+                ADMIN_CACHE[chat_id] = []
+            ADMIN_CACHE[chat_id].append(user_id)
+            return True
     except Exception:
-        return False
+        pass
+    return False
 
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
@@ -149,6 +174,8 @@ async def main():
     async def play_next(chat_id):
         if chat_id in TIMERS:
             TIMERS[chat_id].cancel()
+        PLAYED_TIME[chat_id] = 0
+        
         if LOOP_MODE.get(chat_id) and chat_id in ACTIVE_TRACK:
             next_song = ACTIVE_TRACK[chat_id]
         elif chat_id in QUEUE and QUEUE[chat_id]:
@@ -156,6 +183,7 @@ async def main():
             ACTIVE_TRACK[chat_id] = next_song
         else:
             ACTIVE_TRACK.pop(chat_id, None)
+            PLAYED_TIME.pop(chat_id, None)
             try:
                 await call.leave_group_call(chat_id)
             except Exception:
@@ -184,8 +212,10 @@ async def main():
         TIMERS[chat_id] = asyncio.create_task(update_timeline(chat_id, msg.id, next_song))
 
     async def update_timeline(chat_id, msg_id, song):
-        for i in range(10, song["duration_sec"], 10):
+        start_at = PLAYED_TIME.get(chat_id, 0)
+        for i in range(start_at, song["duration_sec"], 10):
             await asyncio.sleep(10)
+            PLAYED_TIME[chat_id] = i
             if chat_id not in ACTIVE_TRACK or ACTIVE_TRACK[chat_id] != song:
                 return
             try:
@@ -219,11 +249,17 @@ async def main():
         if chat_id in LEAVE_TIMERS:
             LEAVE_TIMERS[chat_id].cancel()
         
-        m = await message.reply_text(f"🔎 **Searching & Preparing:** `{message.text.split(None, 1)[1]}`...")
+        query = message.text.split(None, 1)[1]
+        m = await message.reply_text(f"🔎 **Searching & Preparing:** `{query}`...")
+        
         try:
-            path, title, art, dur, dur_str, thumb = await asyncio.get_event_loop().run_in_executor(None, download_and_convert, message.text.split(None, 1)[1])
+            loop = asyncio.get_running_loop()
+            raw_path, title, art, dur, dur_str, thumb, mp3_file = await loop.run_in_executor(None, download_and_convert, query, 0)
+            
             song = {
-                "path": path,
+                "path": raw_path,
+                "mp3_file": mp3_file,
+                "query": query,
                 "title": title,
                 "artist": art,
                 "duration_sec": dur,
@@ -246,7 +282,8 @@ async def main():
                 )
             else:
                 ACTIVE_TRACK[chat_id] = song
-                stream = InputStream(InputAudioStream(path, HighQualityAudio()))
+                PLAYED_TIME[chat_id] = 0
+                stream = InputStream(InputAudioStream(raw_path, HighQualityAudio()))
                 try:
                     await call.join_group_call(chat_id, stream)
                 except Exception:
@@ -268,21 +305,45 @@ async def main():
         except Exception as e:
             await m.edit(f"❌ **Error:** `{e}`")
 
-    @app.on_message(filters.command(["reload", "refresh"]))
+    @app.on_message(filters.command(["reload", "refresh", "admincache"]))
     async def reload_cmd(client, message):
         chat_id = message.chat.id
         if not await is_admin(client, chat_id, message.from_user.id if message.from_user else 0):
             return await message.reply_text("❌ **Only Admins can use this command!**")
-        QUEUE[chat_id] = []
-        ACTIVE_TRACK.pop(chat_id, None)
-        LOOP_MODE.pop(chat_id, None)
-        if chat_id in TIMERS:
-            TIMERS[chat_id].cancel()
-        try:
-            await call.leave_group_call(chat_id)
-        except Exception:
-            pass
-        await message.reply_text("🔄 **Voice Chat reloaded! Audio stream cleared.**")
+        
+        m = await message.reply_text("🔄 **Refreshing Admin Cache & Syncing Voice Chat...**")
+        
+        # 1. Refresh Admin Cache
+        admins = await reload_admin_cache(client, chat_id)
+        
+        # 2. Assistant & Audio Stream Re-Sync
+        if chat_id in ACTIVE_TRACK:
+            curr = ACTIVE_TRACK[chat_id]
+            current_sec = PLAYED_TIME.get(chat_id, 0)
+            loop = asyncio.get_running_loop()
+            raw_path, _, _, _, _, _, _ = await loop.run_in_executor(None, download_and_convert, curr["query"], current_sec)
+            curr["path"] = raw_path
+            
+            stream = InputStream(InputAudioStream(raw_path, HighQualityAudio()))
+            try:
+                await call.change_stream(chat_id, stream)
+            except Exception:
+                try:
+                    await call.join_group_call(chat_id, stream)
+                except Exception:
+                    pass
+
+        await m.edit(f"✅ **Admin Cache Refreshed!** (`{len(admins)}` Admins Cached)\n🎧 **Voice Chat Stream Synced.**")
+
+    @app.on_message(filters.command("queue"))
+    async def queue_cmd(client, message):
+        chat_id = message.chat.id
+        if chat_id not in QUEUE or not QUEUE[chat_id]:
+            return await message.reply_text("📜 **Queue is empty.**", reply_markup=get_queue_markup())
+        queue_text = "📜 **Upcoming Songs in Queue:**\n\n"
+        for i, song in enumerate(QUEUE[chat_id], 1):
+            queue_text += f"{i}. `{song['title']}` | {song['requester']} | `{song['duration_str']}`\n"
+        await message.reply_text(queue_text, reply_markup=get_queue_markup())
 
     @app.on_message(filters.command(["skip", "pause", "resume", "stop", "shuffle", "loop"]))
     async def admin_cmds(client, m):
@@ -301,11 +362,16 @@ async def main():
         elif cmd == "stop":
             QUEUE.pop(m.chat.id, None)
             ACTIVE_TRACK.pop(m.chat.id, None)
+            PLAYED_TIME.pop(m.chat.id, None)
+            LOOP_MODE.pop(m.chat.id, None)
+            if m.chat.id in TIMERS:
+                TIMERS[m.chat.id].cancel()
             try:
                 await call.leave_group_call(m.chat.id)
             except Exception:
                 pass
-            await m.reply_text("⏹ **Stopped!**")
+            LEAVE_TIMERS[m.chat.id] = asyncio.create_task(delayed_leave(m.chat.id))
+            await m.reply_text("⏹ **Stopped and queue cleared!**")
         elif cmd == "shuffle":
             if m.chat.id in QUEUE and len(QUEUE[m.chat.id]) > 1:
                 random.shuffle(QUEUE[m.chat.id])
@@ -355,10 +421,15 @@ async def main():
         elif q.data == "stop_music":
             QUEUE.pop(chat_id, None)
             ACTIVE_TRACK.pop(chat_id, None)
+            PLAYED_TIME.pop(chat_id, None)
+            LOOP_MODE.pop(chat_id, None)
+            if chat_id in TIMERS:
+                TIMERS[chat_id].cancel()
             try:
                 await call.leave_group_call(chat_id)
             except Exception:
                 pass
+            LEAVE_TIMERS[chat_id] = asyncio.create_task(delayed_leave(chat_id))
             try:
                 await q.message.delete()
             except Exception:
