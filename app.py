@@ -3,7 +3,6 @@ import random
 import asyncio
 import base64
 import requests
-import imageio_ffmpeg
 from aiohttp import web
 import pyrogram
 from pyrogram import Client, filters
@@ -15,9 +14,6 @@ from pytgcalls.types.input_stream.quality import HighQualityAudio
 from pytgcalls.types.stream import StreamAudioEnded
 from Crypto.Cipher import DES
 
-FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
-os.environ["PATH"] += os.pathsep + os.path.dirname(FFMPEG_BIN)
-
 API_ID = 24944630
 API_HASH = "49d2337722244115abf15a4bc9d86eb3"
 BOT_TOKEN = "8663631826:AAHAvGt04-_K1di9r8S6GqvfjBMRW2ZRQ1w"
@@ -26,7 +22,6 @@ DES_KEY = b"38346591"
 
 QUEUE = {}
 ACTIVE_TRACK = {}
-PLAYED_TIME = {}
 ADMIN_CACHE = {}
 TIMERS = {}
 LEAVE_TIMERS = {}
@@ -42,22 +37,18 @@ def decrypt_url(enc_url):
     return url.replace("_96.mp4", "_320.mp4")
 
 def format_sec(sec):
-    mins = sec // 60
-    secs = sec % 60
-    return f"{mins:02d}:{secs:02d}"
+    return f"{sec // 60:02d}:{sec % 60:02d}"
 
 def get_progress_bar(current_sec, total_sec):
     total_bars = 10
     if total_sec <= 0:
         return "🔘──────────"
-    progress = int((current_sec / total_sec) * total_bars)
-    progress = min(max(progress, 0), total_bars)
+    progress = min(max(int((current_sec / total_sec) * total_bars), 0), total_bars)
     return "━" * progress + "🔘" + "─" * (total_bars - progress)
 
-async def fetch_song_meta(query):
+def fetch_song_data(query):
     search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query={query}"
-    loop = asyncio.get_running_loop()
-    r = await loop.run_in_executor(None, lambda: requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10))
+    r = requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
     data = r.json()
     songs = data.get("songs", {}).get("data", [])
     if not songs:
@@ -69,37 +60,12 @@ async def fetch_song_meta(query):
     thumb = songs[0].get("image", "").replace("50x50", "500x500").replace("150x150", "500x500")
 
     detail_url = f"https://www.jiosaavn.com/api.php?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0&_format=json&pids={song_id}"
-    r_detail = await loop.run_in_executor(None, lambda: requests.get(detail_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10))
+    r_detail = requests.get(detail_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
     song_data = r_detail.json().get(song_id)
     duration_sec = int(song_data.get("duration", 0))
     stream_url = decrypt_url(song_data.get("encrypted_media_url"))
     
-    return song_id, title, singers, duration_sec, format_sec(duration_sec), thumb, stream_url
-
-async def download_file_isolated(stream_url, mp3_file):
-    if os.path.exists(mp3_file):
-        return
-    loop = asyncio.get_running_loop()
-    def _dl():
-        res = requests.get(stream_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-        with open(mp3_file, "wb") as f:
-            f.write(res.content)
-    await loop.run_in_executor(None, _dl)
-
-async def convert_raw_isolated(mp3_file, raw_file, start_sec=0):
-    cmd = [FFMPEG_BIN, "-y"]
-    if start_sec > 0:
-        cmd.extend(["-ss", str(start_sec)])
-    cmd.extend([
-        "-threads", "1",
-        "-i", mp3_file,
-        "-f", "s16le", "-ac", "1", "-ar", "48000",
-        "-acodec", "pcm_s16le",
-        "-nostats", "-loglevel", "0",
-        raw_file
-    ])
-    proc = await asyncio.create_subprocess_exec(*cmd)
-    await proc.wait()
+    return title, singers, duration_sec, format_sec(duration_sec), thumb, stream_url
 
 def get_controls():
     return InlineKeyboardMarkup([
@@ -182,7 +148,6 @@ async def main():
     async def play_next(chat_id):
         if chat_id in TIMERS:
             TIMERS[chat_id].cancel()
-        PLAYED_TIME[chat_id] = 0
         
         if LOOP_MODE.get(chat_id) and chat_id in ACTIVE_TRACK:
             next_song = ACTIVE_TRACK[chat_id]
@@ -191,7 +156,6 @@ async def main():
             ACTIVE_TRACK[chat_id] = next_song
         else:
             ACTIVE_TRACK.pop(chat_id, None)
-            PLAYED_TIME.pop(chat_id, None)
             try:
                 await call.leave_group_call(chat_id)
             except Exception:
@@ -199,7 +163,7 @@ async def main():
             LEAVE_TIMERS[chat_id] = asyncio.create_task(delayed_leave(chat_id))
             return
             
-        stream = InputStream(InputAudioStream(next_song["path"], HighQualityAudio()))
+        stream = InputStream(InputAudioStream(next_song["stream_url"], HighQualityAudio()))
         try:
             await call.change_stream(chat_id, stream)
         except Exception:
@@ -211,7 +175,7 @@ async def main():
             f"🎤 **Artist:** `{next_song['artist']}`\n"
             f"👤 **Req by:** {next_song['requester']}\n"
             f"⏱ **Time:** `00:00 {get_progress_bar(0, next_song['duration_sec'])} {next_song['duration_str']}`\n"
-            f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
+            f"🎧 **Audio Quality:** `HD Streaming (Direct URL)`"
         )
         if next_song.get("thumb"):
             msg = await app.send_photo(chat_id, photo=next_song["thumb"], caption=cap, reply_markup=get_controls())
@@ -220,10 +184,8 @@ async def main():
         TIMERS[chat_id] = asyncio.create_task(update_timeline(chat_id, msg.id, next_song))
 
     async def update_timeline(chat_id, msg_id, song):
-        start_at = PLAYED_TIME.get(chat_id, 0)
-        for i in range(start_at, song["duration_sec"], 10):
+        for i in range(10, song["duration_sec"], 10):
             await asyncio.sleep(10)
-            PLAYED_TIME[chat_id] = i
             if chat_id not in ACTIVE_TRACK or ACTIVE_TRACK[chat_id] != song:
                 return
             try:
@@ -236,7 +198,7 @@ async def main():
                         f"🎤 **Artist:** `{song['artist']}`\n"
                         f"👤 **Req by:** {song['requester']}\n"
                         f"⏱ **Time:** `{format_sec(i)} {get_progress_bar(i, song['duration_sec'])} {song['duration_str']}`\n"
-                        f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
+                        f"🎧 **Audio Quality:** `HD Streaming (Direct URL)`"
                     ),
                     reply_markup=get_controls()
                 )
@@ -252,18 +214,13 @@ async def main():
         user_mention = message.from_user.mention if message.from_user else "Friend"
         help_text = (
             f"👋 **Hey {user_mention}! I am 𓆩⚡𝙎𝙤𝙣𝙞𝙘𝙓⚡𓆪 Music Bot.**\n\n"
-            "✨ **Available Commands:**\n\n"
-            "▶️ `/play <song>` - Play music in VC (Everyone)\n"
-            "📜 `/queue` - Show song queue (Everyone)\n\n"
+            "✨ **Commands:**\n"
+            "▶️ `/play <song>` - Play music in VC\n"
+            "📜 `/queue` - Show song queue\n\n"
             "🛡 **Admin Commands:**\n"
-            "⏸ `/pause` - Pause music\n"
-            "▶️ `/resume` - Resume music\n"
-            "⏭ `/skip` - Skip current track\n"
-            "⏹ `/stop` - Stop & clear queue\n"
-            "🔀 `/shuffle` - Shuffle queue\n"
-            "🔂 `/loop` - Loop current track\n"
-            "🔄 `/reload` - Sync VC & refresh Admin cache\n\n"
-            "💡 *Tip: Make sure to promote me as Admin with 'Manage Video Chats' permission!*"
+            "⏸ `/pause` | ▶️ `/resume` | ⏭ `/skip`\n"
+            "⏹ `/stop` | 🔀 `/shuffle` | 🔂 `/loop`\n"
+            "🔄 `/reload` - Sync VC & refresh Admin cache"
         )
         await message.reply_text(
             help_text,
@@ -286,17 +243,11 @@ async def main():
         m = await message.reply_text(f"🔎 **Searching:** `{query}`...")
         
         try:
-            song_id, title, art, dur, dur_str, thumb, stream_url = await fetch_song_meta(query)
-            mp3_file = f"t_{song_id}.mp3"
-            raw_file = f"t_{song_id}_0.raw"
-            
-            await download_file_isolated(stream_url, mp3_file)
-            await convert_raw_isolated(mp3_file, raw_file, 0)
+            loop = asyncio.get_running_loop()
+            title, art, dur, dur_str, thumb, stream_url = await loop.run_in_executor(None, fetch_song_data, query)
             
             song = {
-                "path": raw_file,
-                "mp3_file": mp3_file,
-                "query": query,
+                "stream_url": stream_url,
                 "title": title,
                 "artist": art,
                 "duration_sec": dur,
@@ -319,8 +270,7 @@ async def main():
                 )
             else:
                 ACTIVE_TRACK[chat_id] = song
-                PLAYED_TIME[chat_id] = 0
-                stream = InputStream(InputAudioStream(raw_file, HighQualityAudio()))
+                stream = InputStream(InputAudioStream(stream_url, HighQualityAudio()))
                 try:
                     await call.join_group_call(chat_id, stream)
                 except Exception:
@@ -332,7 +282,7 @@ async def main():
                     f"🎤 **Artist:** `{art}`\n"
                     f"👤 **Requested By:** {song['requester']}\n"
                     f"⏱ **Time:** `00:00 {get_progress_bar(0, dur)} {dur_str}`\n"
-                    f"🎧 **Audio Quality:** `HD Audio (Lossless)`"
+                    f"🎧 **Audio Quality:** `HD Streaming (Direct URL)`"
                 )
                 if thumb:
                     msg = await message.reply_photo(thumb, caption=cap, reply_markup=get_controls())
@@ -353,12 +303,7 @@ async def main():
         
         if chat_id in ACTIVE_TRACK:
             curr = ACTIVE_TRACK[chat_id]
-            current_sec = PLAYED_TIME.get(chat_id, 0)
-            raw_path = f"t_re_{current_sec}.raw"
-            await convert_raw_isolated(curr["mp3_file"], raw_path, current_sec)
-            curr["path"] = raw_path
-            
-            stream = InputStream(InputAudioStream(raw_path, HighQualityAudio()))
+            stream = InputStream(InputAudioStream(curr["stream_url"], HighQualityAudio()))
             try:
                 await call.change_stream(chat_id, stream)
             except Exception:
@@ -396,7 +341,6 @@ async def main():
         elif cmd == "stop":
             QUEUE.pop(m.chat.id, None)
             ACTIVE_TRACK.pop(m.chat.id, None)
-            PLAYED_TIME.pop(m.chat.id, None)
             LOOP_MODE.pop(m.chat.id, None)
             if m.chat.id in TIMERS:
                 TIMERS[m.chat.id].cancel()
@@ -455,7 +399,6 @@ async def main():
         elif q.data == "stop_music":
             QUEUE.pop(chat_id, None)
             ACTIVE_TRACK.pop(chat_id, None)
-            PLAYED_TIME.pop(chat_id, None)
             LOOP_MODE.pop(chat_id, None)
             if chat_id in TIMERS:
                 TIMERS[chat_id].cancel()
