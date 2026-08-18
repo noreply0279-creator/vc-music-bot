@@ -3,8 +3,7 @@ import random
 import asyncio
 import base64
 import subprocess
-import requests
-import imageio_ffmpeg
+import aiohttp
 from aiohttp import web
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,6 +13,7 @@ from pytgcalls.types.input_stream import InputStream, InputAudioStream
 from pytgcalls.types.input_stream.quality import HighQualityAudio
 from pytgcalls.types.stream import StreamAudioEnded
 from Crypto.Cipher import DES
+import imageio_ffmpeg
 
 FFMPEG_BIN = imageio_ffmpeg.get_ffmpeg_exe()
 os.environ["PATH"] += os.pathsep + os.path.dirname(FFMPEG_BIN)
@@ -54,42 +54,52 @@ def get_progress_bar(current_sec, total_sec):
     progress = min(max(progress, 0), total_bars)
     return "━" * progress + "🔘" + "─" * (total_bars - progress)
 
-def download_and_convert(query, start_sec=0):
-    search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query={query}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(search_url, headers=headers, timeout=10)
-    data = r.json()
-    songs = data.get("songs", {}).get("data", [])
-    if not songs:
-        raise Exception("Song not found!")
-    
-    song_id = songs[0].get("id")
-    title = songs[0].get("title", "Song").replace("&quot;", '"').replace("&amp;", "&")
-    singers = songs[0].get("more_info", {}).get("singers", "Artist")
-    thumb = songs[0].get("image", "").replace("50x50", "500x500").replace("150x150", "500x500")
-
-    detail_url = f"https://www.jiosaavn.com/api.php?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0&_format=json&pids={song_id}"
-    r_detail = requests.get(detail_url, headers=headers, timeout=10)
-    song_data = r_detail.json().get(song_id)
-    duration_sec = int(song_data.get("duration", 0))
-    stream_url = decrypt_url(song_data.get("encrypted_media_url"))
-    
-    mp3_file = f"t_{song_id}.mp3"
-    raw_file = f"t_{song_id}_{start_sec}.raw"
-    
-    if not os.path.exists(mp3_file):
-        with open(mp3_file, "wb") as f:
-            f.write(requests.get(stream_url, headers=headers, timeout=25).content)
-        
+def run_ffmpeg_convert(mp3_file, raw_file, start_sec=0):
     cmd = [FFMPEG_BIN, "-y"]
     if start_sec > 0:
         cmd.extend(["-ss", str(start_sec)])
     cmd.extend([
+        "-threads", "1",
         "-i", mp3_file,
         "-f", "s16le", "-ac", "1", "-ar", "48000",
         "-acodec", "pcm_s16le", raw_file
     ])
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+async def async_download_and_convert(query, start_sec=0):
+    search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query={query}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.get(search_url, timeout=10) as r:
+            data = await r.json(content_type=None)
+            songs = data.get("songs", {}).get("data", [])
+            if not songs:
+                raise Exception("Song not found!")
+            
+            song_id = songs[0].get("id")
+            title = songs[0].get("title", "Song").replace("&quot;", '"').replace("&amp;", "&")
+            singers = songs[0].get("more_info", {}).get("singers", "Artist")
+            thumb = songs[0].get("image", "").replace("50x50", "500x500").replace("150x150", "500x500")
+
+        detail_url = f"https://www.jiosaavn.com/api.php?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0&_format=json&pids={song_id}"
+        async with session.get(detail_url, timeout=10) as r_detail:
+            detail_data = await r_detail.json(content_type=None)
+            song_data = detail_data.get(song_id)
+            duration_sec = int(song_data.get("duration", 0))
+            stream_url = decrypt_url(song_data.get("encrypted_media_url"))
+
+        mp3_file = f"t_{song_id}.mp3"
+        raw_file = f"t_{song_id}_{start_sec}.raw"
+
+        if not os.path.exists(mp3_file):
+            async with session.get(stream_url, timeout=25) as audio_r:
+                content = await audio_r.read()
+                with open(mp3_file, "wb") as f:
+                    f.write(content)
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, run_ffmpeg_convert, mp3_file, raw_file, start_sec)
     
     return raw_file, title, singers, duration_sec, format_sec(duration_sec), thumb, mp3_file
 
@@ -130,7 +140,7 @@ async def is_admin(client, chat_id, user_id):
     return False
 
 async def handle_ping(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="Bot is running smoothly!")
 
 async def main():
     server = web.Application()
@@ -253,8 +263,7 @@ async def main():
         m = await message.reply_text(f"🔎 **Searching & Preparing:** `{query}`...")
         
         try:
-            loop = asyncio.get_running_loop()
-            raw_path, title, art, dur, dur_str, thumb, mp3_file = await loop.run_in_executor(None, download_and_convert, query, 0)
+            raw_path, title, art, dur, dur_str, thumb, mp3_file = await async_download_and_convert(query, 0)
             
             song = {
                 "path": raw_path,
@@ -312,16 +321,12 @@ async def main():
             return await message.reply_text("❌ **Only Admins can use this command!**")
         
         m = await message.reply_text("🔄 **Refreshing Admin Cache & Syncing Voice Chat...**")
-        
-        # 1. Refresh Admin Cache
         admins = await reload_admin_cache(client, chat_id)
         
-        # 2. Assistant & Audio Stream Re-Sync
         if chat_id in ACTIVE_TRACK:
             curr = ACTIVE_TRACK[chat_id]
             current_sec = PLAYED_TIME.get(chat_id, 0)
-            loop = asyncio.get_running_loop()
-            raw_path, _, _, _, _, _, _ = await loop.run_in_executor(None, download_and_convert, curr["query"], current_sec)
+            raw_path, _, _, _, _, _, _ = await async_download_and_convert(curr["query"], current_sec)
             curr["path"] = raw_path
             
             stream = InputStream(InputAudioStream(raw_path, HighQualityAudio()))
