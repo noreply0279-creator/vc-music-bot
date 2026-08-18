@@ -2,8 +2,6 @@ import os
 import random
 import asyncio
 import base64
-import subprocess
-import concurrent.futures
 import requests
 import imageio_ffmpeg
 from aiohttp import web
@@ -34,9 +32,6 @@ TIMERS = {}
 LEAVE_TIMERS = {}
 LOOP_MODE = {}
 
-# Background thread pool dedicated ONLY to audio conversion and download
-BG_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
-
 def decrypt_url(enc_url):
     cipher = DES.new(DES_KEY, DES.MODE_ECB)
     dec = cipher.decrypt(base64.b64decode(enc_url))
@@ -59,10 +54,10 @@ def get_progress_bar(current_sec, total_sec):
     progress = min(max(progress, 0), total_bars)
     return "━" * progress + "🔘" + "─" * (total_bars - progress)
 
-def blocking_download_and_convert(query, start_sec=0):
+async def fetch_song_meta(query):
     search_url = f"https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query={query}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(search_url, headers=headers, timeout=10)
+    loop = asyncio.get_running_loop()
+    r = await loop.run_in_executor(None, lambda: requests.get(search_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10))
     data = r.json()
     songs = data.get("songs", {}).get("data", [])
     if not songs:
@@ -74,32 +69,37 @@ def blocking_download_and_convert(query, start_sec=0):
     thumb = songs[0].get("image", "").replace("50x50", "500x500").replace("150x150", "500x500")
 
     detail_url = f"https://www.jiosaavn.com/api.php?__call=song.getDetails&cc=in&_marker=0%3F_marker%3D0&_format=json&pids={song_id}"
-    r_detail = requests.get(detail_url, headers=headers, timeout=10)
+    r_detail = await loop.run_in_executor(None, lambda: requests.get(detail_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10))
     song_data = r_detail.json().get(song_id)
     duration_sec = int(song_data.get("duration", 0))
     stream_url = decrypt_url(song_data.get("encrypted_media_url"))
     
-    mp3_file = f"t_{song_id}.mp3"
-    raw_file = f"t_{song_id}_{start_sec}.raw"
-    
-    if not os.path.exists(mp3_file):
-        audio_data = requests.get(stream_url, headers=headers, timeout=25).content
+    return song_id, title, singers, duration_sec, format_sec(duration_sec), thumb, stream_url
+
+async def download_file_isolated(stream_url, mp3_file):
+    if os.path.exists(mp3_file):
+        return
+    loop = asyncio.get_running_loop()
+    def _dl():
+        res = requests.get(stream_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
         with open(mp3_file, "wb") as f:
-            f.write(audio_data)
-        
-    cmd = [FFMPEG_BIN, "-y", "-threads", "1"]
+            f.write(res.content)
+    await loop.run_in_executor(None, _dl)
+
+async def convert_raw_isolated(mp3_file, raw_file, start_sec=0):
+    cmd = [FFMPEG_BIN, "-y"]
     if start_sec > 0:
         cmd.extend(["-ss", str(start_sec)])
     cmd.extend([
+        "-threads", "1",
         "-i", mp3_file,
         "-f", "s16le", "-ac", "1", "-ar", "48000",
         "-acodec", "pcm_s16le",
-        "-preset", "ultrafast",
+        "-nostats", "-loglevel", "0",
         raw_file
     ])
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    return raw_file, title, singers, duration_sec, format_sec(duration_sec), thumb, mp3_file
+    proc = await asyncio.create_subprocess_exec(*cmd)
+    await proc.wait()
 
 def get_controls():
     return InlineKeyboardMarkup([
@@ -138,7 +138,7 @@ async def is_admin(client, chat_id, user_id):
     return False
 
 async def handle_ping(request):
-    return web.Response(text="Bot is running smoothly!")
+    return web.Response(text="Engine Active")
 
 async def main():
     server = web.Application()
@@ -283,16 +283,18 @@ async def main():
             LEAVE_TIMERS[chat_id].cancel()
         
         query = message.text.split(None, 1)[1]
-        m = await message.reply_text(f"🔎 **Searching & Preparing:** `{query}`...")
+        m = await message.reply_text(f"🔎 **Searching:** `{query}`...")
         
         try:
-            loop = asyncio.get_running_loop()
-            raw_path, title, art, dur, dur_str, thumb, mp3_file = await loop.run_in_executor(
-                BG_EXECUTOR, blocking_download_and_convert, query, 0
-            )
+            song_id, title, art, dur, dur_str, thumb, stream_url = await fetch_song_meta(query)
+            mp3_file = f"t_{song_id}.mp3"
+            raw_file = f"t_{song_id}_0.raw"
+            
+            await download_file_isolated(stream_url, mp3_file)
+            await convert_raw_isolated(mp3_file, raw_file, 0)
             
             song = {
-                "path": raw_path,
+                "path": raw_file,
                 "mp3_file": mp3_file,
                 "query": query,
                 "title": title,
@@ -318,7 +320,7 @@ async def main():
             else:
                 ACTIVE_TRACK[chat_id] = song
                 PLAYED_TIME[chat_id] = 0
-                stream = InputStream(InputAudioStream(raw_path, HighQualityAudio()))
+                stream = InputStream(InputAudioStream(raw_file, HighQualityAudio()))
                 try:
                     await call.join_group_call(chat_id, stream)
                 except Exception:
@@ -352,10 +354,8 @@ async def main():
         if chat_id in ACTIVE_TRACK:
             curr = ACTIVE_TRACK[chat_id]
             current_sec = PLAYED_TIME.get(chat_id, 0)
-            loop = asyncio.get_running_loop()
-            raw_path, _, _, _, _, _, _ = await loop.run_in_executor(
-                BG_EXECUTOR, blocking_download_and_convert, curr["query"], current_sec
-            )
+            raw_path = f"t_re_{current_sec}.raw"
+            await convert_raw_isolated(curr["mp3_file"], raw_path, current_sec)
             curr["path"] = raw_path
             
             stream = InputStream(InputAudioStream(raw_path, HighQualityAudio()))
