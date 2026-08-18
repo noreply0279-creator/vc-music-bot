@@ -72,13 +72,20 @@ def download_and_prepare(query, start_sec=0):
     duration_sec = int(song_data.get("duration", 0))
     stream_url = decrypt_url(song_data.get("encrypted_media_url"))
     
+    mp3_file = f"t_{song_id}.mp3"
     raw_file = f"cache_{song_id}_{start_sec}.raw"
+
+    if not os.path.exists(mp3_file):
+        audio_res = requests.get(stream_url, headers=headers, timeout=25)
+        with open(mp3_file, "wb") as f:
+            f.write(audio_res.content)
+        
     cmd = [FFMPEG_BIN, "-y"]
     if start_sec > 0:
         cmd.extend(["-ss", str(start_sec)])
     cmd.extend([
         "-threads", "1",
-        "-i", stream_url,
+        "-i", mp3_file,
         "-f", "s16le", "-ac", "1", "-ar", "48000",
         "-acodec", "pcm_s16le",
         "-preset", "ultrafast",
